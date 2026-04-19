@@ -178,6 +178,23 @@ export function domainMatches(host: string, pattern: string): boolean {
 	return h === p;
 }
 
+/**
+ * Score a (host, pattern) match. Higher = more specific. 0 = no match.
+ */
+export function scoreDomainMatch(host: string, pattern: string): number {
+	if (!pattern) return 0;
+	const h = host.toLowerCase();
+	const p = pattern.toLowerCase();
+	if (p === "*") return 1;
+	if (p.startsWith("*.")) {
+		const suffix = p.slice(2);
+		if (h === suffix || h.endsWith(`.${suffix}`)) return 500 + suffix.length;
+		return 0;
+	}
+	if (h === p) return 1000 + p.length;
+	return 0;
+}
+
 function hostFromUrl(url: string): string | null {
 	try {
 		return new URL(url).hostname;
@@ -197,6 +214,22 @@ export class PersonaManager {
 		this.bySlug.set(p.slug, p);
 	}
 
+	/** Bulk upsert — used by persona-sync to inject cache/remote personas. */
+	upsert(personas: Persona[]): void {
+		for (const p of personas) this.bySlug.set(p.slug, p);
+	}
+
+	/**
+	 * Load personas previously synced to the `personas_cache` SQLite table.
+	 * Accepts anything with a `list()` returning Persona[] so callers don't
+	 * have to depend on `persona-sync` types here.
+	 */
+	loadFromCache(cache: { list(): Persona[] }): Persona[] {
+		const items = cache.list();
+		this.upsert(items);
+		return items;
+	}
+
 	getBySlug(slug: string): Persona | undefined {
 		return this.bySlug.get(slug);
 	}
@@ -206,19 +239,30 @@ export class PersonaManager {
 	}
 
 	/**
-	 * Pick the persona whose domains glob matches the URL's host. Registration
-	 * order is preserved so earliest match wins; callers can register
-	 * more-specific personas first.
+	 * Pick the persona whose `domains` glob best matches the input. Accepts
+	 * either a hostname (`github.com`) or a full URL. Ranking (higher wins):
+	 *   - exact match (e.g. `github.com`)              → 1000 + len
+	 *   - suffix glob `*.github.com`                   → 500  + suffix-len
+	 *   - bare wildcard `*`                            → 1
+	 * Ties are broken by registration order (first wins).
+	 *
+	 * Falls back to the persona named `browse-helper` if nothing matches.
 	 */
-	matchByDomain(url: string): Persona | undefined {
-		const host = hostFromUrl(url);
-		if (!host) return undefined;
+	matchByDomain(input: string): Persona | undefined {
+		const host =
+			input.includes("://") || input.startsWith("//")
+				? hostFromUrl(input)
+				: input.toLowerCase();
+		if (!host) return this.bySlug.get("browse-helper");
+		let best: { persona: Persona; score: number } | undefined;
 		for (const p of this.bySlug.values()) {
 			for (const pattern of p.frontmatter.domains) {
-				if (domainMatches(host, pattern)) return p;
+				const s = scoreDomainMatch(host, pattern);
+				if (s <= 0) continue;
+				if (!best || s > best.score) best = { persona: p, score: s };
 			}
 		}
-		return undefined;
+		return best?.persona ?? this.bySlug.get("browse-helper");
 	}
 
 	/**

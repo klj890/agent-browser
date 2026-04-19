@@ -40,4 +40,29 @@ contextBridge.exposeInMainWorld("agentBrowser", {
 		delete: (key: string) => ipcRenderer.invoke("vault:delete", key),
 		clear: () => ipcRenderer.invoke("vault:clear"),
 	},
+	history: {
+		list: (limit?: number, offset?: number) =>
+			ipcRenderer.invoke("history:list", limit, offset),
+		search: (q: string, limit?: number) =>
+			ipcRenderer.invoke("history:search", q, limit),
+		clear: () => ipcRenderer.invoke("history:clear"),
+	},
+	bookmarks: {
+		add: (input: { url: string; title?: string; folder?: string }) =>
+			ipcRenderer.invoke("bookmarks:add", input),
+		remove: (id: number) => ipcRenderer.invoke("bookmarks:remove", id),
+		list: (folder?: string) => ipcRenderer.invoke("bookmarks:list", folder),
+		reorder: (folder: string, ids: number[]) =>
+			ipcRenderer.invoke("bookmarks:reorder", folder, ids),
+	},
+	downloads: {
+		list: () => ipcRenderer.invoke("downloads:list"),
+		cancel: (id: string) => ipcRenderer.invoke("downloads:cancel", id),
+		openFolder: (id: string) => ipcRenderer.invoke("downloads:open-folder", id),
+		onProgress: (cb: (rec: unknown) => void) => {
+			const listener = (_: unknown, rec: unknown) => cb(rec);
+			ipcRenderer.on("downloads:progress", listener);
+			return () => ipcRenderer.off("downloads:progress", listener);
+		},
+	},
 });
