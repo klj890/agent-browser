@@ -13,11 +13,6 @@ export interface TabSummary {
 	openedByAgent: boolean;
 }
 
-/**
- * Read-only mirror of the AdminPolicy shape. Keep in sync with
- * apps/main/src/admin-policy.ts (Stage 5.2: renderer never imports from main
- * directly so we duplicate the shape here).
- */
 export interface AdminPolicyView {
 	version: 1;
 	autonomy: "manual" | "confirm-each" | "autonomous";
@@ -118,14 +113,28 @@ export interface AgentBrowserBridge {
 	persona: {
 		list: () => Promise<PersonaSummary[]>;
 		switch: (slug: string) => Promise<PersonaSummary>;
+		create?: (input: {
+			slug: string;
+			name: string;
+			description: string;
+			domains: string[];
+			body: string;
+		}) => Promise<PersonaSummary>;
+		update?: (
+			slug: string,
+			input: {
+				name?: string;
+				description?: string;
+				domains?: string[];
+				body?: string;
+			},
+		) => Promise<PersonaSummary>;
+		delete?: (slug: string) => Promise<boolean>;
+		getSource?: (slug: string) => Promise<string>;
 	};
 	slash?: {
 		execute: (input: string) => Promise<unknown>;
 	};
-	/**
-	 * Auth Vault (P1 Stage 9). `get` is intentionally absent — plaintext secrets
-	 * never cross the process boundary into the renderer.
-	 */
 	vault: {
 		set: (key: string, secret: string) => Promise<boolean>;
 		list: () => Promise<string[]>;

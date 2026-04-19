@@ -1,4 +1,5 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { SettingsRouter } from "../settings/SettingsRouter";
 import { Sidebar } from "../sidebar/Sidebar";
 import type { TabSummary } from "../types/preload";
 
@@ -7,6 +8,7 @@ const REFRESH_MS = 500;
 export function App() {
 	const [tabs, setTabs] = useState<TabSummary[]>([]);
 	const [urlInput, setUrlInput] = useState("");
+	const [settingsOpen, setSettingsOpen] = useState(false);
 
 	const refresh = useCallback(async () => {
 		const bridge = window.agentBrowser;
@@ -105,6 +107,14 @@ export function App() {
 					onChange={(e) => setUrlInput(e.target.value)}
 					placeholder="URL or search"
 				/>
+				<button
+					type="button"
+					onClick={() => setSettingsOpen(true)}
+					aria-label="Open settings"
+					title="Settings"
+				>
+					⚙
+				</button>
 			</form>
 			<main className="content">
 				<section className="webview-slot">
@@ -114,6 +124,11 @@ export function App() {
 				</section>
 				<Sidebar />
 			</main>
+			{settingsOpen && (
+				<div className="settings-overlay" role="dialog" aria-modal="true">
+					<SettingsRouter onClose={() => setSettingsOpen(false)} />
+				</div>
+			)}
 		</div>
 	);
 }
