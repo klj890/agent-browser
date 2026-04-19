@@ -32,6 +32,7 @@ import {
 	registerPersonaIpc,
 	registerPolicyIpc,
 	registerTabIpc,
+	registerTraceIpc,
 	registerVaultIpc,
 } from "./ipc.js";
 import { PersonaManager } from "./persona-manager.js";
@@ -363,6 +364,7 @@ async function createMainWindow(
 	const unregisterAgent = registerAgentIpc(orchestrator, () => win.webContents);
 	const unregisterSlash = registerSlashIpc(infra, tm, orchestrator);
 	const unregisterVault = registerVaultIpc(infra.vault);
+	const unregisterTrace = registerTraceIpc(infra.auditLog);
 	const unregisterPersona = registerPersonaIpc({
 		personaManager,
 		getActiveSlug: () => activeSlug,
@@ -407,6 +409,7 @@ async function createMainWindow(
 		unregisterPersona();
 		unregisterSlash();
 		unregisterVault();
+		unregisterTrace();
 		unregisterHistory();
 		unregisterBookmarks();
 		unregisterDownloads();

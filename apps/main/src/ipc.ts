@@ -7,6 +7,7 @@
 import { ipcMain, type WebContents } from "electron";
 import type { AdminPolicy } from "./admin-policy.js";
 import type { AgentHost, StreamChunk } from "./agent-host.js";
+import type { AuditEvent, AuditLog, TaskTraceSummary } from "./audit-log.js";
 import type { AuthVault } from "./auth-vault.js";
 import type { BookmarksStore } from "./bookmarks.js";
 import type { DownloadManager } from "./download.js";
@@ -366,6 +367,42 @@ export function registerPersonaIpc(deps: PersonaIpcDeps): () => void {
 				if (!found) throw new Error(`no such persona: ${slug}`);
 				deps.setActiveSlug(slug);
 				return summarize(found, slug);
+			},
+		],
+	];
+	for (const [ch, fn] of handlers) ipcMain.handle(ch, fn);
+	return () => {
+		for (const [ch] of handlers) ipcMain.removeHandler(ch);
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Trace IPC (P1 Stage 14)
+// ---------------------------------------------------------------------------
+
+export function registerTraceIpc(auditLog: AuditLog): () => void {
+	const handlers: Array<[string, (...args: unknown[]) => unknown]> = [
+		[
+			"trace:listTasks",
+			(_e, limit: unknown) => {
+				const n = typeof limit === "number" ? limit : 50;
+				return auditLog.listTasks(n) as TaskTraceSummary[];
+			},
+		],
+		[
+			"trace:getTaskEvents",
+			(_e, taskId: unknown) => {
+				if (typeof taskId !== "string")
+					throw new Error("trace:getTaskEvents needs string taskId");
+				const events = auditLog.list({ taskId, limit: 10_000 });
+				return events.reverse() as AuditEvent[];
+			},
+		],
+		[
+			"trace:clear",
+			async () => {
+				await auditLog.clear();
+				return true;
 			},
 		],
 	];

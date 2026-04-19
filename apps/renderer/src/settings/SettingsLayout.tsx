@@ -7,6 +7,7 @@ const NAV = [
 	{ to: "/settings/bookmarks", label: "Bookmarks" },
 	{ to: "/settings/downloads", label: "Downloads" },
 	{ to: "/settings/vault", label: "Auth Vault" },
+	{ to: "/settings/trace", label: "Trace" },
 ] as const;
 
 interface Props {

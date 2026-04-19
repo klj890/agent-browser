@@ -6,6 +6,7 @@ import { HistoryView } from "./history/HistoryView";
 import { PersonasView } from "./personas/PersonasView";
 import { SettingsIndex } from "./SettingsIndex";
 import { SettingsLayout } from "./SettingsLayout";
+import { TraceView } from "./trace/TraceView";
 import { VaultView } from "./vault/VaultView";
 
 interface Props {
@@ -25,6 +26,7 @@ export function SettingsRouter({ onClose }: Props) {
 					<Route path="settings/bookmarks" element={<BookmarksView />} />
 					<Route path="settings/downloads" element={<DownloadsView />} />
 					<Route path="settings/vault" element={<VaultView />} />
+					<Route path="settings/trace" element={<TraceView />} />
 					<Route path="*" element={<Navigate to="/settings" replace />} />
 				</Route>
 			</Routes>

@@ -40,6 +40,13 @@ contextBridge.exposeInMainWorld("agentBrowser", {
 		delete: (key: string) => ipcRenderer.invoke("vault:delete", key),
 		clear: () => ipcRenderer.invoke("vault:clear"),
 	},
+	trace: {
+		listTasks: (limit?: number) =>
+			ipcRenderer.invoke("trace:listTasks", limit),
+		getTaskEvents: (taskId: string) =>
+			ipcRenderer.invoke("trace:getTaskEvents", taskId),
+		clear: () => ipcRenderer.invoke("trace:clear"),
+	},
 	history: {
 		list: (limit?: number, offset?: number) =>
 			ipcRenderer.invoke("history:list", limit, offset),

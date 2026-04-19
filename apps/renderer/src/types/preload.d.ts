@@ -78,6 +78,104 @@ export interface BookmarkView {
 	created_at: number;
 }
 
+export interface TaskTraceSummary {
+	task_id: string;
+	started_at: number;
+	ended_at?: number;
+	status: "running" | "completed" | "failed" | "killed" | "budget_exceeded";
+	persona: string;
+}
+
+export type TraceEvent =
+	| {
+			event: "llm.call.pre";
+			ts: number;
+			task_id: string;
+			model: string;
+			provider: string;
+			input_tokens_est: number;
+			redaction_hits: Record<string, number>;
+			persona: string;
+			autonomy: string;
+	  }
+	| {
+			event: "llm.call.post";
+			ts: number;
+			task_id: string;
+			model: string;
+			input_tokens: number;
+			output_tokens: number;
+			usd_cost: number;
+			finish_reason: string;
+			duration_ms: number;
+	  }
+	| {
+			event: "tool.call";
+			ts: number;
+			task_id: string;
+			tool: string;
+			args_hash: string;
+			ref?: string;
+			result_ref: string | null;
+			byte_size: number;
+			high_risk_flags: string[];
+	  }
+	| {
+			event: "tool.confirm";
+			ts: number;
+			task_id: string;
+			tool: string;
+			decision: "approved" | "denied" | "timeout";
+			latency_ms: number;
+	  }
+	| {
+			event: "task.start";
+			ts: number;
+			task_id: string;
+			user_prompt_hash: string;
+			persona: string;
+			tab_url: string;
+	  }
+	| {
+			event: "task.end";
+			ts: number;
+			task_id: string;
+			status: "completed" | "failed" | "killed" | "budget_exceeded";
+			steps: number;
+			total_usd: number;
+			total_tokens: number;
+	  }
+	| {
+			event: "task.state-change";
+			ts: number;
+			task_id: string;
+			from: string;
+			to: string;
+			reason?: string;
+	  }
+	| {
+			event: "injection.flag";
+			ts: number;
+			task_id: string;
+			source_url: string;
+			pattern: string;
+			snippet_hash: string;
+	  }
+	| {
+			event: "policy.change";
+			ts: number;
+			actor: "admin";
+			diff: object;
+			prev_hash: string;
+			new_hash: string;
+	  };
+
+export interface UnknownTraceEvent {
+	event: string;
+	ts: number;
+	[key: string]: unknown;
+}
+
 export interface DownloadRecordView {
 	id: string;
 	url: string;
@@ -139,6 +237,11 @@ export interface AgentBrowserBridge {
 		set: (key: string, secret: string) => Promise<boolean>;
 		list: () => Promise<string[]>;
 		delete: (key: string) => Promise<boolean>;
+		clear: () => Promise<boolean>;
+	};
+	trace: {
+		listTasks: (limit?: number) => Promise<TaskTraceSummary[]>;
+		getTaskEvents: (taskId: string) => Promise<TraceEvent[]>;
 		clear: () => Promise<boolean>;
 	};
 	history: {
