@@ -67,6 +67,33 @@ export interface PersonaSummary {
 	active: boolean;
 }
 
+export interface HistoryEntryView {
+	id: number;
+	url: string;
+	title: string;
+	visited_at: number;
+}
+
+export interface BookmarkView {
+	id: number;
+	url: string;
+	title: string;
+	folder: string;
+	position: number;
+	created_at: number;
+}
+
+export interface DownloadRecordView {
+	id: string;
+	url: string;
+	filename: string;
+	path: string;
+	state: "progressing" | "paused" | "completed" | "cancelled" | "interrupted";
+	received: number;
+	total: number;
+	started_at: number;
+}
+
 export interface AgentBrowserBridge {
 	agent: {
 		prompt: (text: string) => Promise<string>;
@@ -91,6 +118,30 @@ export interface AgentBrowserBridge {
 	persona: {
 		list: () => Promise<PersonaSummary[]>;
 		switch: (slug: string) => Promise<PersonaSummary>;
+	};
+	slash?: {
+		execute: (input: string) => Promise<unknown>;
+	};
+	history: {
+		list: (limit?: number, offset?: number) => Promise<HistoryEntryView[]>;
+		search: (q: string, limit?: number) => Promise<HistoryEntryView[]>;
+		clear: () => Promise<boolean>;
+	};
+	bookmarks: {
+		add: (input: {
+			url: string;
+			title?: string;
+			folder?: string;
+		}) => Promise<BookmarkView>;
+		remove: (id: number) => Promise<boolean>;
+		list: (folder?: string) => Promise<BookmarkView[]>;
+		reorder: (folder: string, ids: number[]) => Promise<boolean>;
+	};
+	downloads: {
+		list: () => Promise<DownloadRecordView[]>;
+		cancel: (id: string) => Promise<boolean>;
+		openFolder: (id: string) => Promise<boolean>;
+		onProgress: (cb: (rec: DownloadRecordView) => void) => () => void;
 	};
 }
 

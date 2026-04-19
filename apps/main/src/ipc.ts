@@ -7,6 +7,9 @@
 import { ipcMain, type WebContents } from "electron";
 import type { AdminPolicy } from "./admin-policy.js";
 import type { AgentHost, StreamChunk } from "./agent-host.js";
+import type { BookmarksStore } from "./bookmarks.js";
+import type { DownloadManager } from "./download.js";
+import type { HistoryStore } from "./history.js";
 import type { Persona, PersonaManager } from "./persona-manager.js";
 import type { TabManager } from "./tab-manager.js";
 
@@ -179,6 +182,121 @@ function summarize(p: Persona, activeSlug: string | undefined): PersonaSummary {
 		description: p.description,
 		domains: p.frontmatter.domains,
 		active: p.slug === activeSlug,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// History IPC (Stage 1.5)
+// ---------------------------------------------------------------------------
+
+export function registerHistoryIpc(store: HistoryStore): () => void {
+	const handlers: Array<[string, (...args: unknown[]) => unknown]> = [
+		[
+			"history:list",
+			(_e, limit: unknown, offset: unknown) => {
+				const l = typeof limit === "number" ? limit : 50;
+				const o = typeof offset === "number" ? offset : 0;
+				return store.list(l, o);
+			},
+		],
+		[
+			"history:search",
+			(_e, q: unknown, limit: unknown) => {
+				if (typeof q !== "string")
+					throw new Error("history:search needs string q");
+				const l = typeof limit === "number" ? limit : 50;
+				return store.search(q, l);
+			},
+		],
+		[
+			"history:clear",
+			() => {
+				store.clear();
+				return true;
+			},
+		],
+	];
+	for (const [ch, fn] of handlers) ipcMain.handle(ch, fn);
+	return () => {
+		for (const [ch] of handlers) ipcMain.removeHandler(ch);
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Bookmarks IPC (Stage 1.5)
+// ---------------------------------------------------------------------------
+
+export function registerBookmarksIpc(store: BookmarksStore): () => void {
+	const handlers: Array<[string, (...args: unknown[]) => unknown]> = [
+		[
+			"bookmarks:add",
+			(_e, input: unknown) => {
+				if (!input || typeof input !== "object") {
+					throw new Error("bookmarks:add needs {url,title?,folder?}");
+				}
+				return store.add(
+					input as { url: string; title?: string; folder?: string },
+				);
+			},
+		],
+		[
+			"bookmarks:remove",
+			(_e, id: unknown) => {
+				if (typeof id !== "number")
+					throw new Error("bookmarks:remove needs number id");
+				return store.remove(id);
+			},
+		],
+		[
+			"bookmarks:list",
+			(_e, folder: unknown) => {
+				return store.list(typeof folder === "string" ? folder : undefined);
+			},
+		],
+		[
+			"bookmarks:reorder",
+			(_e, folder: unknown, ids: unknown) => {
+				if (typeof folder !== "string" || !Array.isArray(ids)) {
+					throw new Error("bookmarks:reorder needs (folder, ids[])");
+				}
+				store.reorder(folder, ids.map(Number));
+				return true;
+			},
+		],
+	];
+	for (const [ch, fn] of handlers) ipcMain.handle(ch, fn);
+	return () => {
+		for (const [ch] of handlers) ipcMain.removeHandler(ch);
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Downloads IPC (Stage 1.6)
+// ---------------------------------------------------------------------------
+
+export function registerDownloadsIpc(dm: DownloadManager): () => void {
+	const handlers: Array<[string, (...args: unknown[]) => unknown]> = [
+		["downloads:list", () => dm.list()],
+		[
+			"downloads:cancel",
+			(_e, id: unknown) => {
+				if (typeof id !== "string")
+					throw new Error("downloads:cancel needs string id");
+				return dm.cancel(id);
+			},
+		],
+		[
+			"downloads:open-folder",
+			(_e, id: unknown) => {
+				if (typeof id !== "string")
+					throw new Error("downloads:open-folder needs string id");
+				return dm.openFolder(id);
+			},
+		],
+	];
+	for (const [ch, fn] of handlers) ipcMain.handle(ch, fn);
+	return () => {
+		for (const [ch] of handlers) ipcMain.removeHandler(ch);
 	};
 }
 

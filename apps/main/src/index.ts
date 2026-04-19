@@ -1,6 +1,14 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, BrowserWindow, globalShortcut, ipcMain } from "electron";
+import {
+	app,
+	BrowserWindow,
+	dialog,
+	globalShortcut,
+	ipcMain,
+	session,
+	shell,
+} from "electron";
 import {
 	type AdminPolicy,
 	AdminPolicyStore,
@@ -9,17 +17,25 @@ import {
 import type { AgentHost, StreamChunk } from "./agent-host.js";
 import { createAgentHostForTab } from "./agent-host-factory.js";
 import { AuditLog } from "./audit-log.js";
+import { BookmarksStore } from "./bookmarks.js";
 import { ConfirmationHandler } from "./confirmation.js";
+import { DownloadManager } from "./download.js";
 import { registerEmergencyStop } from "./emergency-stop.js";
+import { HistoryStore } from "./history.js";
 import {
 	type AgentOrchestrator,
 	registerAgentIpc,
+	registerBookmarksIpc,
+	registerDownloadsIpc,
+	registerHistoryIpc,
 	registerPersonaIpc,
 	registerPolicyIpc,
 	registerTabIpc,
 } from "./ipc.js";
 import { PersonaManager } from "./persona-manager.js";
+import { syncPersonasOnce } from "./persona-sync.js";
 import { createDefaultSlashRegistry } from "./slash-commands.js";
+import { getAppDatabase } from "./storage/sqlite.js";
 import type { TabManager as TabManagerType } from "./tab-manager.js";
 import { TabManager } from "./tab-manager.js";
 import { TaskStateStore } from "./task-state.js";
@@ -264,12 +280,64 @@ async function createMainWindow(
 		await win.loadFile(path.join(__dirname, "../../renderer/dist/index.html"));
 	}
 
-	const tm = new TabManager({ window: win });
+	// Persistent stores (Stage 1.5 / 1.6).
+	const userDataDir = app.getPath("userData");
+	const appDb = getAppDatabase(
+		path.join(userDataDir, "agent-browser", "app.sqlite"),
+	);
+	const historyStore = new HistoryStore(appDb);
+	const bookmarksStore = new BookmarksStore(appDb);
+	const unregisterHistory = registerHistoryIpc(historyStore);
+	const unregisterBookmarks = registerBookmarksIpc(bookmarksStore);
+
+	let activeSlug: string | undefined = personaManager.list()[0]?.slug;
+	// Lazily populated below once orchestrator is built; the hook reads through
+	// this indirection so the current host can be found at nav time.
+	const hostRef: { get: () => AgentHost | undefined } = {
+		get: () => undefined,
+	};
+
+	const tm = new TabManager({
+		window: win,
+		navigationHook: {
+			onNavigate: (_tabId, url, title) => {
+				try {
+					historyStore.record(url, title);
+				} catch (err) {
+					console.warn("[history] record failed:", err);
+				}
+				// Auto-switch persona by domain (Stage 4.7).
+				try {
+					const match = personaManager.matchByDomain(url);
+					if (match) {
+						if (activeSlug !== match.slug) activeSlug = match.slug;
+						hostRef.get()?.switchPersona(match);
+					}
+				} catch (err) {
+					console.warn("[persona-auto-switch] failed:", err);
+				}
+			},
+		},
+	});
 	const unregisterTab = registerTabIpc(tm);
 	tm.create("https://example.com");
 	win.on("resize", () => tm.handleResize());
 
-	let activeSlug: string | undefined = personaManager.list()[0]?.slug;
+	// Downloads (Stage 1.6).
+	const downloadsMgr = new DownloadManager({
+		session: session.defaultSession,
+		dialog: {
+			showSaveDialog: (opts) => dialog.showSaveDialog(win, opts),
+		},
+		defaultDir: app.getPath("downloads"),
+		broadcast: (rec) => {
+			if (!win.isDestroyed()) win.webContents.send("downloads:progress", rec);
+		},
+		openFolder: (p) => {
+			void shell.openPath(p);
+		},
+	});
+	const unregisterDownloads = registerDownloadsIpc(downloadsMgr);
 	const orchestrator = createOrchestrator({
 		tabManager: tm,
 		policy,
@@ -280,6 +348,8 @@ async function createMainWindow(
 		confirmation: infra.confirmation,
 		taskStore: infra.taskStore,
 	});
+	hostRef.get = () => orchestrator.getHost();
+
 	const unregisterAgent = registerAgentIpc(orchestrator, () => win.webContents);
 	const unregisterSlash = registerSlashIpc(infra, tm, orchestrator);
 	const unregisterPersona = registerPersonaIpc({
@@ -325,6 +395,9 @@ async function createMainWindow(
 		unregisterAgent();
 		unregisterPersona();
 		unregisterSlash();
+		unregisterHistory();
+		unregisterBookmarks();
+		unregisterDownloads();
 		ipcMain.removeHandler("tab:snapshotCurrent");
 		tm.destroy();
 	});
@@ -370,6 +443,16 @@ app.whenReady().then(async () => {
 	const personaManager = await initPersonaManager();
 	const infra = createWindowInfra(policy);
 	globalTaskStore = infra.taskStore;
+	// Persona sync (Stage 4.5) — best effort; falls back to local cache.
+	try {
+		const userDataDir = app.getPath("userData");
+		const appDb = getAppDatabase(
+			path.join(userDataDir, "agent-browser", "app.sqlite"),
+		);
+		await syncPersonasOnce({ appDb, personaManager });
+	} catch (err) {
+		console.warn("[persona-sync] failed:", err);
+	}
 	// Emergency stop — global shortcut aborts all running tasks in the window.
 	registerEmergencyStop({ store: infra.taskStore, globalShortcut });
 	await createMainWindow(policy, personaManager, infra);
