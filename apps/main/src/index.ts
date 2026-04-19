@@ -23,6 +23,8 @@ import { ConfirmationHandler } from "./confirmation.js";
 import { DownloadManager } from "./download.js";
 import { registerEmergencyStop } from "./emergency-stop.js";
 import { HistoryStore } from "./history.js";
+import { HistoryIndex } from "./history-index.js";
+import { createRedactionPipelineFromPolicy } from "./redaction-pipeline.js";
 import {
 	type AgentOrchestrator,
 	registerAgentIpc,
@@ -298,6 +300,14 @@ async function createMainWindow(
 		path.join(userDataDir, "agent-browser", "app.sqlite"),
 	);
 	const historyStore = new HistoryStore(appDb);
+	const historyIndex = new HistoryIndex(appDb);
+	// Reuse the admin redaction policy to sanitize history text before embedding.
+	const historyRedactor = createRedactionPipelineFromPolicy(
+		policy.get() as unknown as {
+			redaction?: import("./redaction-pipeline.js").RedactionPolicy;
+		},
+	);
+	historyStore.attachIndex(historyIndex, historyRedactor);
 	const bookmarksStore = new BookmarksStore(appDb);
 	const unregisterHistory = registerHistoryIpc(historyStore);
 	const unregisterBookmarks = registerBookmarksIpc(bookmarksStore);
@@ -314,7 +324,7 @@ async function createMainWindow(
 		navigationHook: {
 			onNavigate: (_tabId, url, title) => {
 				try {
-					historyStore.record(url, title);
+					historyStore.recordWithIndex(url, title);
 				} catch (err) {
 					console.warn("[history] record failed:", err);
 				}

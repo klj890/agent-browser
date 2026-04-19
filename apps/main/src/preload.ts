@@ -63,6 +63,8 @@ contextBridge.exposeInMainWorld("agentBrowser", {
 			ipcRenderer.invoke("history:list", limit, offset),
 		search: (q: string, limit?: number) =>
 			ipcRenderer.invoke("history:search", q, limit),
+		semanticSearch: (q: string, limit?: number) =>
+			ipcRenderer.invoke("history:semanticSearch", q, limit),
 		clear: () => ipcRenderer.invoke("history:clear"),
 	},
 	bookmarks: {

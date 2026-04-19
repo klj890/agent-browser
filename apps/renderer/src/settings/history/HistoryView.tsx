@@ -4,17 +4,25 @@ import type { HistoryEntryView } from "../../types/preload";
 export function HistoryView() {
 	const [entries, setEntries] = useState<HistoryEntryView[]>([]);
 	const [query, setQuery] = useState("");
+	const [semantic, setSemantic] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [available, setAvailable] = useState(true);
 
-	const load = useCallback(async (q: string) => {
+	const load = useCallback(async (q: string, useSemantic: boolean) => {
 		const bridge = window.agentBrowser?.history;
 		if (!bridge) {
 			setAvailable(false);
 			return;
 		}
 		try {
-			const list = q ? await bridge.search(q) : await bridge.list();
+			let list: HistoryEntryView[];
+			if (!q) {
+				list = await bridge.list();
+			} else if (useSemantic) {
+				list = await bridge.semanticSearch(q);
+			} else {
+				list = await bridge.search(q);
+			}
 			setEntries(list);
 			setError(null);
 		} catch (err) {
@@ -23,12 +31,12 @@ export function HistoryView() {
 	}, []);
 
 	useEffect(() => {
-		void load("");
+		void load("", false);
 	}, [load]);
 
 	const onSearch = (e: React.FormEvent) => {
 		e.preventDefault();
-		void load(query);
+		void load(query, semantic);
 	};
 
 	const onClear = async () => {
@@ -36,7 +44,7 @@ export function HistoryView() {
 		if (!bridge) return;
 		if (!confirm("Clear all history?")) return;
 		await bridge.clear();
-		void load(query);
+		void load(query, semantic);
 	};
 
 	if (!available) {
@@ -60,9 +68,26 @@ export function HistoryView() {
 				<input
 					value={query}
 					onChange={(e) => setQuery(e.target.value)}
-					placeholder="Search URL or title…"
+					placeholder={
+						semantic ? "Semantic search…" : "Search URL or title…"
+					}
 				/>
 				<button type="submit">Search</button>
+				<label
+					style={{
+						marginLeft: 8,
+						display: "inline-flex",
+						alignItems: "center",
+						gap: 4,
+					}}
+				>
+					<input
+						type="checkbox"
+						checked={semantic}
+						onChange={(e) => setSemantic(e.target.checked)}
+					/>
+					Semantic
+				</label>
 			</form>
 			{error && (
 				<p role="alert" className="settings-error">

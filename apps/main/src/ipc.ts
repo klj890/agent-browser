@@ -257,6 +257,15 @@ export function registerHistoryIpc(store: HistoryStore): () => void {
 			},
 		],
 		[
+			"history:semanticSearch",
+			async (_e, q: unknown, limit: unknown) => {
+				if (typeof q !== "string")
+					throw new Error("history:semanticSearch needs string q");
+				const l = typeof limit === "number" ? limit : 20;
+				return store.semanticSearch(q, l);
+			},
+		],
+		[
 			"history:clear",
 			() => {
 				store.clear();

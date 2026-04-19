@@ -278,6 +278,7 @@ export interface AgentBrowserBridge {
 	history: {
 		list: (limit?: number, offset?: number) => Promise<HistoryEntryView[]>;
 		search: (q: string, limit?: number) => Promise<HistoryEntryView[]>;
+		semanticSearch: (q: string, limit?: number) => Promise<HistoryEntryView[]>;
 		clear: () => Promise<boolean>;
 	};
 	bookmarks: {
