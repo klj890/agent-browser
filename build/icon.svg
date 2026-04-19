@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Placeholder icon for Agent Browser.
+     Replace with a real brand asset before v0.1 release.
+     Square 1024x1024 recommended when exporting to PNG. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a3a6e"/>
+      <stop offset="100%" stop-color="#0d1f3d"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="180" ry="180" fill="url(#bg)"/>
+  <text x="512" y="620"
+        text-anchor="middle"
+        font-family="-apple-system, Helvetica, Arial, sans-serif"
+        font-weight="800"
+        font-size="420"
+        fill="#ffffff"
+        letter-spacing="-12">AB</text>
+</svg>

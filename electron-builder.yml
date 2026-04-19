@@ -1,0 +1,77 @@
+appId: io.agentbrowser.app
+productName: Agent Browser
+# Output the distributables to ./release (gitignored).
+directories:
+  output: release
+  buildResources: build
+
+# We package a prebuilt main-process dist + renderer dist, plus the runtime
+# files (personas, system prompt) that the agent host reads at runtime.
+# node_modules for apps/main (better-sqlite3, keytar, electron, nanoid, zod)
+# is included so the bundled Electron app can require them.
+files:
+  - apps/main/dist/**/*
+  - apps/main/package.json
+  - apps/main/personas/**/*
+  - apps/main/src/prompts/**/*
+  - apps/renderer/dist/**/*
+  - packages/browser-tools/src/**/*
+  - packages/browser-tools/package.json
+  - package.json
+  # Exclude test fixtures and dev-only metadata we don't want shipped.
+  - "!**/__tests__/**/*"
+  - "!**/*.test.ts"
+  - "!**/*.test.js"
+  - "!**/*.map"
+  - "!**/tsconfig*.json"
+
+# Packaging strategy: asar on by default; native modules MUST be unpacked.
+asar: true
+asarUnpack:
+  - "**/*.node"
+  - "**/better-sqlite3/**"
+  - "**/keytar/**"
+
+# ---- Platform targets -----------------------------------------------------
+
+mac:
+  category: public.app-category.productivity
+  # dev builds are self-signed; CI will override to a real identity later.
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  icon: build/icon.png
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  icon: build/icon.png
+  # No certificate configured for P0 dev builds. CI will inject signing later.
+
+linux:
+  category: Utility
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  icon: build/icon.png
+
+# ---- NSIS (Windows) -------------------------------------------------------
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+
+# ---- Other ---------------------------------------------------------------
+# Disable publishing — releases are cut manually via `gh release create`.
+publish: null
+# Skip auto-update for P0. Later: electron-updater + GitHub publisher.

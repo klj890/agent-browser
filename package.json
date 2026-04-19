@@ -1,0 +1,38 @@
+{
+	"name": "agent-browser",
+	"private": true,
+	"type": "module",
+	"version": "0.1.0",
+	"packageManager": "pnpm@9.15.0",
+	"scripts": {
+		"dev:main": "tsx apps/main/src/index.ts",
+		"dev:renderer": "pnpm --filter @agent-browser/renderer run dev",
+		"build": "pnpm -r run build",
+		"build:main": "pnpm --filter @agent-browser/main run build",
+		"build:renderer": "pnpm --filter @agent-browser/renderer run build",
+		"build:all": "pnpm run build:main && pnpm run build:renderer",
+		"check": "biome check .",
+		"format": "biome format --write .",
+		"test": "vitest run",
+		"e2e": "vitest run --config e2e/vitest.config.ts",
+		"spike:ref": "tsx spike/ref-stability.ts",
+		"verify:cookie-leak": "tsx scripts/verify-cookie-leak.ts",
+		"verify:injection": "tsx scripts/verify-injection.ts",
+		"verify:all": "pnpm run verify:cookie-leak && pnpm run verify:injection",
+		"test:scripts": "vitest run --config scripts/vitest.config.ts",
+		"package:dry": "node scripts/package-dry.mjs",
+		"package:mac": "pnpm run build:all && electron-builder --mac",
+		"package:win": "pnpm run build:all && electron-builder --win",
+		"package:linux": "pnpm run build:all && electron-builder --linux"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.3.5",
+		"@playwright/browser-chromium": "^1.59.1",
+		"@types/node": "^22.10.5",
+		"electron-builder": "^25.1.8",
+		"playwright-core": "^1.59.1",
+		"tsx": "^4.20.3",
+		"typescript": "^5.9.2",
+		"vitest": "^4.0.18"
+	}
+}
