@@ -96,14 +96,21 @@ export interface BrowserViewLike {
 	}) => void;
 }
 
+export interface TabNavigationHook {
+	onNavigate?: (tabId: string, url: string, title: string) => void;
+}
+
 export interface TabManagerDeps {
 	window: BrowserWindow;
 	createView?: (partition: string) => BrowserViewLike;
+	/** Optional nav hook — used by history + persona auto-switch. */
+	navigationHook?: TabNavigationHook;
 }
 
 export class TabManager {
 	private readonly window: BrowserWindow;
 	private readonly createView: (partition: string) => BrowserViewLike;
+	private readonly navigationHook?: TabNavigationHook;
 	private readonly tabs = new Map<string, Tab>();
 	private activeTabId?: string;
 	private readonly closedStack: ClosedTabRecord[] = [];
@@ -112,6 +119,7 @@ export class TabManager {
 	constructor(deps: TabManagerDeps) {
 		this.window = deps.window;
 		this.createView = deps.createView ?? defaultCreateView;
+		this.navigationHook = deps.navigationHook;
 	}
 
 	/** Create a tab; by default it is activated (brought to foreground). */
@@ -320,8 +328,19 @@ export class TabManager {
 		// Clear ref registry whenever the page lifetime turns over. We listen for
 		// both Electron's did-navigate AND the CDP-equivalent page-frame-navigated
 		// to match PLAN 附录 E's resetLifetime contract.
-		wc.on("did-navigate", () => {
+		wc.on("did-navigate", (..._args: unknown[]) => {
 			tab.registry.resetLifetime();
+			try {
+				tab.url = wc.getURL();
+				tab.title = wc.getTitle();
+			} catch {
+				/* ignore */
+			}
+			try {
+				this.navigationHook?.onNavigate?.(tab.id, tab.url, tab.title);
+			} catch (err) {
+				console.warn("[tab-manager] navigation hook threw:", err);
+			}
 		});
 		wc.on("page-frame-navigated", () => {
 			tab.registry.resetLifetime();

@@ -195,7 +195,8 @@ export interface AgentHostOpts {
  * conversation list internally.
  */
 export class AgentHost {
-	private readonly systemPrompt: string;
+	private systemPrompt: string;
+	private currentPersonaSlug?: string;
 	private readonly skillMap: Map<string, Skill>;
 	private readonly skills: Skill[];
 	private readonly streamFn: StreamFn;
@@ -238,6 +239,36 @@ export class AgentHost {
 
 	cancel(): void {
 		this.currentAbort?.abort();
+	}
+
+	/**
+	 * Switch persona for subsequent turns (Stage 4.7). Updates the system prompt
+	 * in the running conversation and records the active slug. Persona-specific
+	 * skill filtering stays in the factory layer — this method is intentionally
+	 * small so tab-manager can call it on navigation without refactoring.
+	 */
+	switchPersona(persona: {
+		slug: string;
+		name?: string;
+		contentMd?: string;
+	}): void {
+		if (this.currentPersonaSlug === persona.slug) return;
+		this.currentPersonaSlug = persona.slug;
+		const next =
+			persona.contentMd && persona.contentMd.trim().length > 0
+				? persona.contentMd
+				: this.systemPrompt;
+		this.systemPrompt = next;
+		// Replace the leading system message so the next run() sees the new prompt.
+		if (this.messages.length > 0 && this.messages[0]?.role === "system") {
+			this.messages[0] = { role: "system", content: next };
+		} else {
+			this.messages.unshift({ role: "system", content: next });
+		}
+	}
+
+	getPersonaSlug(): string | undefined {
+		return this.currentPersonaSlug;
 	}
 
 	/**
