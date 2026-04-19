@@ -67,6 +67,37 @@ export interface PersonaSummary {
 	active: boolean;
 }
 
+export interface HistoryEntry {
+	id: string;
+	url: string;
+	title: string;
+	visitedAt: number;
+}
+
+export interface BookmarkEntry {
+	id: string;
+	url: string;
+	title: string;
+	createdAt: number;
+}
+
+export interface DownloadEntry {
+	id: string;
+	url: string;
+	filename: string;
+	path: string;
+	bytesReceived: number;
+	bytesTotal: number;
+	state: "progressing" | "completed" | "cancelled" | "interrupted";
+}
+
+export interface DownloadProgress {
+	id: string;
+	bytesReceived: number;
+	bytesTotal: number;
+	state: DownloadEntry["state"];
+}
+
 export interface AgentBrowserBridge {
 	agent: {
 		prompt: (text: string) => Promise<string>;
@@ -91,6 +122,50 @@ export interface AgentBrowserBridge {
 	persona: {
 		list: () => Promise<PersonaSummary[]>;
 		switch: (slug: string) => Promise<PersonaSummary>;
+		// Placeholder CRUD — server side lives in a sibling repo; UI only.
+		create?: (input: {
+			slug: string;
+			name: string;
+			description: string;
+			domains: string[];
+			body: string;
+		}) => Promise<PersonaSummary>;
+		update?: (
+			slug: string,
+			input: {
+				name?: string;
+				description?: string;
+				domains?: string[];
+				body?: string;
+			},
+		) => Promise<PersonaSummary>;
+		delete?: (slug: string) => Promise<boolean>;
+		getSource?: (slug: string) => Promise<string>;
+	};
+	slash?: {
+		execute: (input: string) => Promise<unknown>;
+	};
+	vault?: {
+		list: () => Promise<string[]>;
+		set: (key: string, secret: string) => Promise<boolean>;
+		delete: (key: string) => Promise<boolean>;
+		clear: () => Promise<boolean>;
+	};
+	history?: {
+		list: (query?: string) => Promise<HistoryEntry[]>;
+		delete: (id: string) => Promise<boolean>;
+		clear: () => Promise<boolean>;
+	};
+	bookmarks?: {
+		list: () => Promise<BookmarkEntry[]>;
+		add: (url: string, title: string) => Promise<BookmarkEntry>;
+		delete: (id: string) => Promise<boolean>;
+	};
+	downloads?: {
+		list: () => Promise<DownloadEntry[]>;
+		cancel: (id: string) => Promise<boolean>;
+		openFolder: (id: string) => Promise<boolean>;
+		onProgress: (cb: (p: DownloadProgress) => void) => () => void;
 	};
 }
 

@@ -265,3 +265,239 @@ body,
 	background: #999;
 	cursor: not-allowed;
 }
+
+/* ---- Settings overlay ---- */
+.settings-overlay {
+	position: fixed;
+	inset: 0;
+	background: rgba(0, 0, 0, 0.45);
+	z-index: 100;
+	display: flex;
+	padding: 24px;
+}
+.settings-root {
+	flex: 1;
+	display: grid;
+	grid-template-columns: 220px 1fr;
+	background: #fff;
+	border-radius: 8px;
+	overflow: hidden;
+	box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+}
+.settings-nav {
+	background: #1a3a6e;
+	color: #fff;
+	display: flex;
+	flex-direction: column;
+}
+.settings-nav-header {
+	padding: 16px;
+	font-weight: 600;
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+.settings-nav-header button {
+	background: transparent;
+	border: none;
+	color: #fff;
+	font-size: 20px;
+	cursor: pointer;
+	line-height: 1;
+}
+.settings-nav nav {
+	display: flex;
+	flex-direction: column;
+	padding: 8px 0;
+}
+.settings-nav-link {
+	display: block;
+	padding: 8px 16px;
+	color: rgba(255, 255, 255, 0.85);
+	text-decoration: none;
+	font-size: 13px;
+}
+.settings-nav-link:hover {
+	background: rgba(255, 255, 255, 0.08);
+}
+.settings-nav-link.active {
+	background: rgba(255, 255, 255, 0.15);
+	color: #fff;
+	font-weight: 600;
+}
+.settings-main {
+	overflow: auto;
+	padding: 20px 24px;
+	background: #fafafa;
+}
+.settings-view {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+.settings-view h2 {
+	margin: 0;
+	font-size: 18px;
+}
+.settings-view-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+}
+.settings-view-header button,
+.settings-search button,
+.settings-actions button,
+.settings-editor button,
+.settings-list-item button {
+	background: #fff;
+	border: 1px solid #ccc;
+	border-radius: 4px;
+	padding: 4px 10px;
+	font-size: 12px;
+	cursor: pointer;
+}
+.settings-view-header button:hover,
+.settings-search button:hover,
+.settings-actions button:hover,
+.settings-list-item button:hover {
+	background: #f0f4fa;
+}
+.settings-search {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+}
+.settings-search input {
+	flex: 1;
+	padding: 6px 8px;
+	border: 1px solid #ccc;
+	border-radius: 4px;
+	font-size: 13px;
+}
+.settings-error {
+	color: #a00;
+	background: #ffe6e6;
+	padding: 6px 10px;
+	border-radius: 4px;
+	font-size: 12px;
+}
+.settings-hint {
+	background: #fff7e6;
+	border-left: 3px solid #e6a700;
+	padding: 8px 12px;
+	font-size: 12px;
+	color: #444;
+}
+.settings-empty {
+	color: #888;
+	font-style: italic;
+	padding: 12px;
+	text-align: center;
+}
+.settings-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 13px;
+	background: #fff;
+	border: 1px solid #e0e0e0;
+}
+.settings-table th,
+.settings-table td {
+	border-bottom: 1px solid #eee;
+	padding: 6px 10px;
+	text-align: left;
+	vertical-align: top;
+}
+.settings-table th {
+	background: #f0f2f5;
+	font-weight: 600;
+}
+.settings-actions {
+	display: flex;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+.settings-editor {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	background: #fff;
+	border: 1px solid #ddd;
+	border-radius: 6px;
+	padding: 12px 16px;
+}
+.settings-editor h3 {
+	margin: 0 0 4px 0;
+	font-size: 14px;
+}
+.settings-field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	font-size: 12px;
+	color: #555;
+}
+.settings-field input,
+.settings-field textarea {
+	padding: 6px 8px;
+	border: 1px solid #ccc;
+	border-radius: 4px;
+	font-size: 13px;
+	font-family: inherit;
+}
+.settings-field textarea {
+	font-family: ui-monospace, Menlo, monospace;
+	font-size: 12px;
+}
+.settings-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.settings-list-item {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 12px;
+	background: #fff;
+	border: 1px solid #e0e0e0;
+	border-radius: 4px;
+	padding: 8px 12px;
+}
+.settings-list-main {
+	flex: 1;
+	min-width: 0;
+}
+.settings-list-title {
+	font-weight: 500;
+	font-size: 13px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.settings-list-sub {
+	font-size: 11px;
+	color: #777;
+	margin-top: 2px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.settings-list-sub a {
+	color: #1a3a6e;
+	text-decoration: none;
+}
+.settings-progress {
+	margin-top: 6px;
+	height: 4px;
+	background: #eee;
+	border-radius: 2px;
+	overflow: hidden;
+}
+.settings-progress-bar {
+	height: 100%;
+	background: #1a3a6e;
+	transition: width 0.2s ease;
+}
