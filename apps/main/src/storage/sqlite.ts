@@ -136,4 +136,14 @@ CREATE TABLE IF NOT EXISTS personas_cache (
 CREATE INDEX IF NOT EXISTS personas_cache_updated ON personas_cache(last_updated DESC);
 `,
 	},
+	{
+		name: "002_history_embeddings.sql",
+		sql: `
+CREATE TABLE IF NOT EXISTS history_embeddings (
+  history_id INTEGER PRIMARY KEY REFERENCES history(id) ON DELETE CASCADE,
+  dim INTEGER NOT NULL,
+  vec BLOB NOT NULL
+);
+`,
+	},
 ];
