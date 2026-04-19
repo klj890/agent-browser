@@ -212,7 +212,11 @@ export class RoutinesEngine {
 			error: (m) => console.error(`[routines] ${m}`),
 		};
 		this.cronImpl = opts.cronImpl ?? {
-			schedule: (e, f) => cron.schedule(e, f, { scheduled: false }),
+			schedule: (e, f) => {
+				const task = cron.schedule(e, f);
+				task.stop();
+				return task;
+			},
 			validate: (e) => cron.validate(e),
 		};
 	}
