@@ -78,6 +78,23 @@ export interface BookmarkView {
 	created_at: number;
 }
 
+export interface RoutineInput {
+	name: string;
+	description?: string;
+	schedule: string;
+	persona?: string;
+	prompt: string;
+	enabled: boolean;
+}
+
+export interface RoutineStatusView extends RoutineInput {
+	lastRunAt?: number;
+	lastRunStatus?: "ok" | "error";
+	lastRunError?: string;
+	nextRunAt?: number;
+	scheduled: boolean;
+}
+
 export interface TaskTraceSummary {
 	task_id: string;
 	started_at: number;
@@ -243,6 +260,20 @@ export interface AgentBrowserBridge {
 		listTasks: (limit?: number) => Promise<TaskTraceSummary[]>;
 		getTaskEvents: (taskId: string) => Promise<TraceEvent[]>;
 		clear: () => Promise<boolean>;
+	};
+	routines: {
+		list: () => Promise<RoutineStatusView[]>;
+		create: (routine: RoutineInput) => Promise<RoutineStatusView>;
+		update: (
+			name: string,
+			routine: RoutineInput,
+		) => Promise<RoutineStatusView>;
+		delete: (name: string) => Promise<boolean>;
+		enable: (
+			name: string,
+			enabled: boolean,
+		) => Promise<RoutineStatusView>;
+		runNow: (name: string) => Promise<boolean>;
 	};
 	history: {
 		list: (limit?: number, offset?: number) => Promise<HistoryEntryView[]>;

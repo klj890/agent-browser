@@ -13,6 +13,7 @@ import type { BookmarksStore } from "./bookmarks.js";
 import type { DownloadManager } from "./download.js";
 import type { HistoryStore } from "./history.js";
 import type { Persona, PersonaManager } from "./persona-manager.js";
+import type { Routine, RoutinesEngine } from "./routines.js";
 import type { TabManager } from "./tab-manager.js";
 
 export function registerTabIpc(tm: TabManager): () => void {
@@ -402,6 +403,77 @@ export function registerTraceIpc(auditLog: AuditLog): () => void {
 			"trace:clear",
 			async () => {
 				await auditLog.clear();
+				return true;
+			},
+		],
+	];
+	for (const [ch, fn] of handlers) ipcMain.handle(ch, fn);
+	return () => {
+		for (const [ch] of handlers) ipcMain.removeHandler(ch);
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Routines IPC (P1 Stage 10)
+// ---------------------------------------------------------------------------
+
+function toRoutine(raw: unknown): Routine {
+	if (!raw || typeof raw !== "object")
+		throw new Error("routine must be object");
+	const o = raw as Record<string, unknown>;
+	if (typeof o.name !== "string" || o.name === "")
+		throw new Error("routine.name required");
+	if (typeof o.schedule !== "string" || o.schedule === "")
+		throw new Error("routine.schedule required");
+	if (typeof o.prompt !== "string" || o.prompt === "")
+		throw new Error("routine.prompt required");
+	const out: Routine = {
+		name: o.name,
+		schedule: o.schedule,
+		prompt: o.prompt,
+		enabled: o.enabled === true,
+	};
+	if (typeof o.description === "string") out.description = o.description;
+	if (typeof o.persona === "string") out.persona = o.persona;
+	return out;
+}
+
+export function registerRoutinesIpc(engine: RoutinesEngine): () => void {
+	const handlers: Array<[string, (...args: unknown[]) => unknown]> = [
+		["routines:list", () => engine.list()],
+		[
+			"routines:create",
+			(_e, routine: unknown) => engine.create(toRoutine(routine)),
+		],
+		[
+			"routines:update",
+			(_e, name: unknown, routine: unknown) => {
+				if (typeof name !== "string") throw new Error("name must be string");
+				return engine.update(name, toRoutine(routine));
+			},
+		],
+		[
+			"routines:delete",
+			async (_e, name: unknown) => {
+				if (typeof name !== "string") throw new Error("name must be string");
+				await engine.remove(name);
+				return true;
+			},
+		],
+		[
+			"routines:enable",
+			(_e, name: unknown, enabled: unknown) => {
+				if (typeof name !== "string") throw new Error("name must be string");
+				if (typeof enabled !== "boolean")
+					throw new Error("enabled must be boolean");
+				return engine.setEnabled(name, enabled);
+			},
+		],
+		[
+			"routines:runNow",
+			async (_e, name: unknown) => {
+				if (typeof name !== "string") throw new Error("name must be string");
+				await engine.runNow(name);
 				return true;
 			},
 		],

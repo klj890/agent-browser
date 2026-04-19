@@ -47,6 +47,17 @@ contextBridge.exposeInMainWorld("agentBrowser", {
 			ipcRenderer.invoke("trace:getTaskEvents", taskId),
 		clear: () => ipcRenderer.invoke("trace:clear"),
 	},
+	routines: {
+		list: () => ipcRenderer.invoke("routines:list"),
+		create: (routine: unknown) =>
+			ipcRenderer.invoke("routines:create", routine),
+		update: (name: string, routine: unknown) =>
+			ipcRenderer.invoke("routines:update", name, routine),
+		delete: (name: string) => ipcRenderer.invoke("routines:delete", name),
+		enable: (name: string, enabled: boolean) =>
+			ipcRenderer.invoke("routines:enable", name, enabled),
+		runNow: (name: string) => ipcRenderer.invoke("routines:runNow", name),
+	},
 	history: {
 		list: (limit?: number, offset?: number) =>
 			ipcRenderer.invoke("history:list", limit, offset),

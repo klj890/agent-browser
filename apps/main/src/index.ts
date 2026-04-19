@@ -31,10 +31,12 @@ import {
 	registerHistoryIpc,
 	registerPersonaIpc,
 	registerPolicyIpc,
+	registerRoutinesIpc,
 	registerTabIpc,
 	registerTraceIpc,
 	registerVaultIpc,
 } from "./ipc.js";
+import { RoutinesEngine } from "./routines.js";
 import { PersonaManager } from "./persona-manager.js";
 import { syncPersonasOnce } from "./persona-sync.js";
 import { createDefaultSlashRegistry } from "./slash-commands.js";
@@ -365,6 +367,14 @@ async function createMainWindow(
 	const unregisterSlash = registerSlashIpc(infra, tm, orchestrator);
 	const unregisterVault = registerVaultIpc(infra.vault);
 	const unregisterTrace = registerTraceIpc(infra.auditLog);
+	const routinesEngine = new RoutinesEngine({
+		dir: path.join(userDataDir, "agent-browser", "routines"),
+		orchestrator: {
+			startTask: (prompt, target) => orchestrator.startTask(prompt, target),
+		},
+	});
+	void routinesEngine.load().then(() => routinesEngine.start());
+	const unregisterRoutines = registerRoutinesIpc(routinesEngine);
 	const unregisterPersona = registerPersonaIpc({
 		personaManager,
 		getActiveSlug: () => activeSlug,
@@ -410,6 +420,8 @@ async function createMainWindow(
 		unregisterSlash();
 		unregisterVault();
 		unregisterTrace();
+		unregisterRoutines();
+		routinesEngine.stop();
 		unregisterHistory();
 		unregisterBookmarks();
 		unregisterDownloads();

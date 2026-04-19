@@ -6,6 +6,7 @@ import { HistoryView } from "./history/HistoryView";
 import { PersonasView } from "./personas/PersonasView";
 import { SettingsIndex } from "./SettingsIndex";
 import { SettingsLayout } from "./SettingsLayout";
+import { RoutinesView } from "./routines/RoutinesView";
 import { TraceView } from "./trace/TraceView";
 import { VaultView } from "./vault/VaultView";
 
@@ -27,6 +28,7 @@ export function SettingsRouter({ onClose }: Props) {
 					<Route path="settings/downloads" element={<DownloadsView />} />
 					<Route path="settings/vault" element={<VaultView />} />
 					<Route path="settings/trace" element={<TraceView />} />
+					<Route path="settings/routines" element={<RoutinesView />} />
 					<Route path="*" element={<Navigate to="/settings" replace />} />
 				</Route>
 			</Routes>
