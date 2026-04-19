@@ -1,0 +1,241 @@
+/**
+ * PersonaManager (Stage 3.6).
+ *
+ * Personas are Markdown files with a YAML front matter preamble. They steer
+ * the Agent's behaviour per tab/domain. This module:
+ *   - Parses the front matter + markdown body into a typed Persona.
+ *   - Holds an in-memory registry keyed by slug.
+ *   - Matches personas to a URL via glob-style domain patterns so TabManager
+ *     can auto-switch when navigating.
+ *
+ * Front matter is parsed with a tiny hand-rolled YAML subset (strings, lists,
+ * nested single-level). We deliberately avoid `gray-matter` / `js-yaml` — the
+ * fields we care about are a fixed schema and adding a runtime dep for this
+ * feels wasteful.
+ *
+ * Stage 4.5 will add a sync-from-server path; this file stays local-only.
+ */
+import { readdir, readFile } from "node:fs/promises";
+import path from "node:path";
+
+export interface PersonaFrontmatter {
+	name: string;
+	description: string;
+	/** glob-style domain patterns, e.g. `*.github.com`, `example.com`. */
+	domains: string[];
+	/** Optional tool whitelist; empty/undefined = all tools. */
+	allowedTools?: string[];
+}
+
+export interface Persona {
+	slug: string;
+	name: string;
+	description: string;
+	contentMd: string;
+	frontmatter: PersonaFrontmatter;
+}
+
+// ---------------------------------------------------------------------------
+// Front matter parsing (minimal YAML subset)
+// ---------------------------------------------------------------------------
+
+const FRONTMATTER_RE = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?([\s\S]*)$/;
+
+export class PersonaParseError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "PersonaParseError";
+	}
+}
+
+/**
+ * Parse the inline array `[a, b, c]` or strip quotes from a scalar.
+ */
+function parseScalarOrArray(raw: string): string | string[] {
+	const v = raw.trim();
+	if (v.startsWith("[") && v.endsWith("]")) {
+		const inner = v.slice(1, -1).trim();
+		if (inner === "") return [];
+		return inner.split(",").map((s) => stripQuotes(s.trim()));
+	}
+	return stripQuotes(v);
+}
+
+function stripQuotes(v: string): string {
+	if (
+		(v.startsWith('"') && v.endsWith('"')) ||
+		(v.startsWith("'") && v.endsWith("'"))
+	) {
+		return v.slice(1, -1);
+	}
+	return v;
+}
+
+/**
+ * Parse front matter YAML. Supports `key: scalar`, `key: [a, b]` and multiline
+ * block lists (`key:\n  - a\n  - b`). Unknown keys are retained as strings.
+ */
+export function parseFrontmatter(
+	yamlBody: string,
+): Record<string, string | string[]> {
+	const out: Record<string, string | string[]> = {};
+	const lines = yamlBody.split(/\r?\n/);
+	let i = 0;
+	while (i < lines.length) {
+		const line = lines[i] ?? "";
+		i++;
+		const trimmed = line.trim();
+		if (trimmed === "" || trimmed.startsWith("#")) continue;
+		const colonIdx = line.indexOf(":");
+		if (colonIdx === -1) continue;
+		const key = line.slice(0, colonIdx).trim();
+		const valuePart = line.slice(colonIdx + 1).trim();
+		if (valuePart === "") {
+			// Multiline block list.
+			const items: string[] = [];
+			while (i < lines.length) {
+				const next = lines[i] ?? "";
+				const m = /^\s+-\s+(.*)$/.exec(next);
+				if (!m) break;
+				const raw = m[1] ?? "";
+				items.push(stripQuotes(raw.trim()));
+				i++;
+			}
+			out[key] = items;
+		} else {
+			out[key] = parseScalarOrArray(valuePart);
+		}
+	}
+	return out;
+}
+
+function toStringArray(
+	v: string | string[] | undefined,
+	field: string,
+): string[] {
+	if (v === undefined) return [];
+	if (typeof v === "string") {
+		throw new PersonaParseError(`persona field '${field}' must be a list`);
+	}
+	return v;
+}
+
+/**
+ * Parse a full persona markdown source (front matter + body).
+ */
+export function parsePersona(slug: string, source: string): Persona {
+	const m = FRONTMATTER_RE.exec(source);
+	if (!m) {
+		throw new PersonaParseError(`persona '${slug}' missing front matter`);
+	}
+	const fm = parseFrontmatter(m[1] ?? "");
+	const body = m[2] ?? "";
+
+	const name = fm.name;
+	const description = fm.description;
+	if (typeof name !== "string" || name === "") {
+		throw new PersonaParseError(`persona '${slug}' missing 'name'`);
+	}
+	if (typeof description !== "string" || description === "") {
+		throw new PersonaParseError(`persona '${slug}' missing 'description'`);
+	}
+	const domains = toStringArray(fm.domains, "domains");
+	const allowedToolsRaw = fm.allowedTools;
+	const allowedTools =
+		allowedToolsRaw === undefined
+			? undefined
+			: toStringArray(allowedToolsRaw, "allowedTools");
+
+	return {
+		slug,
+		name,
+		description,
+		contentMd: body.trim(),
+		frontmatter: { name, description, domains, allowedTools },
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Domain matcher
+// ---------------------------------------------------------------------------
+
+/**
+ * Match a host against a glob-style pattern. Supported syntax:
+ *   - `example.com`        — exact match
+ *   - `*.example.com`      — any single-or-multi-label subdomain (sub.example.com, a.b.example.com)
+ *   - `*`                  — wildcard (matches anything)
+ * Case-insensitive. Empty pattern never matches.
+ */
+export function domainMatches(host: string, pattern: string): boolean {
+	if (!pattern) return false;
+	const h = host.toLowerCase();
+	const p = pattern.toLowerCase();
+	if (p === "*") return true;
+	if (p.startsWith("*.")) {
+		const suffix = p.slice(2);
+		return h === suffix || h.endsWith(`.${suffix}`);
+	}
+	return h === p;
+}
+
+function hostFromUrl(url: string): string | null {
+	try {
+		return new URL(url).hostname;
+	} catch {
+		return null;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Registry
+// ---------------------------------------------------------------------------
+
+export class PersonaManager {
+	private readonly bySlug = new Map<string, Persona>();
+
+	register(p: Persona): void {
+		this.bySlug.set(p.slug, p);
+	}
+
+	getBySlug(slug: string): Persona | undefined {
+		return this.bySlug.get(slug);
+	}
+
+	list(): Persona[] {
+		return Array.from(this.bySlug.values());
+	}
+
+	/**
+	 * Pick the persona whose domains glob matches the URL's host. Registration
+	 * order is preserved so earliest match wins; callers can register
+	 * more-specific personas first.
+	 */
+	matchByDomain(url: string): Persona | undefined {
+		const host = hostFromUrl(url);
+		if (!host) return undefined;
+		for (const p of this.bySlug.values()) {
+			for (const pattern of p.frontmatter.domains) {
+				if (domainMatches(host, pattern)) return p;
+			}
+		}
+		return undefined;
+	}
+
+	/**
+	 * Load every `*.md` file under `dir` as a persona. Slug = filename without
+	 * extension. Parse errors are surfaced to caller (fail fast during boot).
+	 */
+	async loadFromDir(dir: string): Promise<Persona[]> {
+		const entries = await readdir(dir);
+		const loaded: Persona[] = [];
+		for (const name of entries) {
+			if (!name.endsWith(".md")) continue;
+			const slug = name.slice(0, -3);
+			const source = await readFile(path.join(dir, name), "utf8");
+			const persona = parsePersona(slug, source);
+			this.register(persona);
+			loaded.push(persona);
+		}
+		return loaded;
+	}
+}

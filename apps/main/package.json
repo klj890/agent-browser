@@ -1,0 +1,22 @@
+{
+	"name": "@agent-browser/main",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"main": "dist/index.js",
+	"scripts": {
+		"dev": "tsx src/index.ts",
+		"build": "tsc -p tsconfig.json"
+	},
+	"dependencies": {
+		"@agent-browser/browser-tools": "workspace:*",
+		"better-sqlite3": "^11.5.0",
+		"electron": "^33.2.0",
+		"keytar": "^7.9.0",
+		"nanoid": "^5.0.9",
+		"zod": "^3.23.8"
+	},
+	"devDependencies": {
+		"@types/better-sqlite3": "^7.6.12"
+	}
+}
