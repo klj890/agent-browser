@@ -30,6 +30,7 @@ import {
 	ToolResultTooLargeError,
 } from "./agent-host.js";
 import type { AuditLog } from "./audit-log.js";
+import type { AuthVault } from "./auth-vault.js";
 import type { ConfirmationHandler } from "./confirmation.js";
 import { createDefaultStreamFn } from "./llm/factory.js";
 import type { Persona, PersonaManager } from "./persona-manager.js";
@@ -66,6 +67,8 @@ export interface FactoryDeps {
 	confirmation?: ConfirmationHandler;
 	/** Optional Stage 7.1 integration: creates and tracks a Task per run. */
 	taskStore?: TaskStateStore;
+	/** Optional P1 Stage 9 integration: resolves `{{vault:*}}` in tool args. */
+	vault?: AuthVault;
 }
 
 export interface CreateAgentHostOpts {
@@ -129,7 +132,7 @@ export async function createAgentHostForTab(
 	const tabUrl =
 		tabManager.list().find((t) => t.id === tabId)?.url ?? "about:blank";
 
-	const preToolHooks: Array<HookMap["pre-tool-call"]> = [vaultPlaceholderHook];
+	const preToolHooks: Array<HookMap["pre-tool-call"]> = [];
 	if (deps.confirmation) {
 		preToolHooks.push(
 			buildConfirmationHook(deps.confirmation, () => currentTabUrl()),
@@ -207,6 +210,7 @@ export async function createAgentHostForTab(
 			"pre-tool-call": preToolHooks,
 			"post-tool-call": postToolHooks,
 		},
+		vault: deps.vault,
 	});
 
 	// Track tab url so confirmation hook can report the current origin.
@@ -284,15 +288,6 @@ function appendPersonaBody(systemPrompt: string, body: string): string {
 // ---------------------------------------------------------------------------
 // Default hooks
 // ---------------------------------------------------------------------------
-
-/**
- * TODO(P1-9): resolve `{{vault:domain.example.com:field}}` placeholders in
- * tool call args against the Auth Vault. For now this is a structural no-op;
- * the hook is registered so the order of hook execution is locked in.
- */
-const vaultPlaceholderHook: HookMap["pre-tool-call"] = (_ctx) => {
-	// intentional no-op (Stage 3 scope); see apps/main/src/auth-vault.ts (P1-9).
-};
 
 /**
  * Enforce the 4KB soft limit from 附录 L. Stage 6.5 will replace this with an

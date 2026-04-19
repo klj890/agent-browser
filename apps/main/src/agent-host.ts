@@ -25,6 +25,7 @@ import { nanoid } from "nanoid";
 import type { AdminPolicy } from "./admin-policy.js";
 import { checkCostBudget } from "./admin-policy.js";
 import type { SensitiveWordFilter } from "./redaction-pipeline.js";
+import { resolveArgs, type VaultLookup } from "./vault-resolver.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -188,6 +189,12 @@ export interface AgentHostOpts {
 	hooks?: Partial<{
 		[K in HookName]: Array<HookMap[K]>;
 	}>;
+	/**
+	 * Optional vault used to resolve `{{vault:<key>}}` placeholders in tool-call
+	 * string args before dispatch. Resolution happens right after `pre-tool-call`
+	 * hooks so the LLM never sees the secret.
+	 */
+	vault?: VaultLookup;
 }
 
 /**
@@ -201,6 +208,7 @@ export class AgentHost {
 	private readonly streamFn: StreamFn;
 	private readonly policy: AdminPolicy;
 	private readonly redaction: SensitiveWordFilter;
+	private readonly vault?: VaultLookup;
 	private readonly hooks: {
 		[K in HookName]: Array<HookMap[K]>;
 	};
@@ -215,6 +223,7 @@ export class AgentHost {
 		this.streamFn = opts.streamFn;
 		this.policy = opts.policy;
 		this.redaction = opts.redaction;
+		this.vault = opts.vault;
 		this.hooks = {
 			"pre-llm-call": [...(opts.hooks?.["pre-llm-call"] ?? [])],
 			"post-llm-call": [...(opts.hooks?.["post-llm-call"] ?? [])],
@@ -419,6 +428,19 @@ export class AgentHost {
 				return { denied: true, error: err.reason };
 			}
 			throw err;
+		}
+
+		// Resolve `{{vault:*}}` placeholders in string args (P1 Stage 9). Done
+		// after pre-tool-call hooks and BEFORE tool execution so secrets never
+		// appear in the audit log's args_hash (hooks see the raw template) nor
+		// in any LLM-visible context.
+		if (this.vault) {
+			try {
+				call.args = await resolveArgs(call.args, this.vault);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				return { error: msg };
+			}
 		}
 
 		const skill = this.skillMap.get(call.name);

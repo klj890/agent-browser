@@ -33,4 +33,11 @@ contextBridge.exposeInMainWorld("agentBrowser", {
 	slash: {
 		execute: (input: string) => ipcRenderer.invoke("slash:execute", input),
 	},
+	vault: {
+		set: (key: string, secret: string) =>
+			ipcRenderer.invoke("vault:set", key, secret),
+		list: () => ipcRenderer.invoke("vault:list"),
+		delete: (key: string) => ipcRenderer.invoke("vault:delete", key),
+		clear: () => ipcRenderer.invoke("vault:clear"),
+	},
 });

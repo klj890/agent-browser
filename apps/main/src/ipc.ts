@@ -7,6 +7,7 @@
 import { ipcMain, type WebContents } from "electron";
 import type { AdminPolicy } from "./admin-policy.js";
 import type { AgentHost, StreamChunk } from "./agent-host.js";
+import type { AuthVault } from "./auth-vault.js";
 import type { Persona, PersonaManager } from "./persona-manager.js";
 import type { TabManager } from "./tab-manager.js";
 
@@ -179,6 +180,51 @@ function summarize(p: Persona, activeSlug: string | undefined): PersonaSummary {
 		description: p.description,
 		domains: p.frontmatter.domains,
 		active: p.slug === activeSlug,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Vault IPC (P1 Stage 9)
+// ---------------------------------------------------------------------------
+
+/**
+ * Expose the AuthVault to the renderer. `vault:get` is intentionally NOT
+ * exposed — the renderer must never fetch plaintext secrets. `list` returns
+ * key names only; tool calls resolve placeholders in the main process.
+ */
+export function registerVaultIpc(vault: AuthVault): () => void {
+	const handlers: Array<[string, (...args: unknown[]) => unknown]> = [
+		[
+			"vault:set",
+			async (_e, key: unknown, secret: unknown) => {
+				if (typeof key !== "string" || typeof secret !== "string") {
+					throw new Error("vault:set needs (key, secret)");
+				}
+				await vault.set(key, secret);
+				return true;
+			},
+		],
+		["vault:list", () => vault.list()],
+		[
+			"vault:delete",
+			async (_e, key: unknown) => {
+				if (typeof key !== "string") {
+					throw new Error("vault:delete needs string key");
+				}
+				return vault.delete(key);
+			},
+		],
+		[
+			"vault:clear",
+			async () => {
+				await vault.clear();
+				return true;
+			},
+		],
+	];
+	for (const [ch, fn] of handlers) ipcMain.handle(ch, fn);
+	return () => {
+		for (const [ch] of handlers) ipcMain.removeHandler(ch);
 	};
 }
 

@@ -92,6 +92,19 @@ export interface AgentBrowserBridge {
 		list: () => Promise<PersonaSummary[]>;
 		switch: (slug: string) => Promise<PersonaSummary>;
 	};
+	slash?: {
+		execute: (input: string) => Promise<unknown>;
+	};
+	/**
+	 * Auth Vault (P1 Stage 9). `get` is intentionally absent — plaintext secrets
+	 * never cross the process boundary into the renderer.
+	 */
+	vault: {
+		set: (key: string, secret: string) => Promise<boolean>;
+		list: () => Promise<string[]>;
+		delete: (key: string) => Promise<boolean>;
+		clear: () => Promise<boolean>;
+	};
 }
 
 declare global {

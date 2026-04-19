@@ -9,6 +9,7 @@ import {
 import type { AgentHost, StreamChunk } from "./agent-host.js";
 import { createAgentHostForTab } from "./agent-host-factory.js";
 import { AuditLog } from "./audit-log.js";
+import { AuthVault } from "./auth-vault.js";
 import { ConfirmationHandler } from "./confirmation.js";
 import { registerEmergencyStop } from "./emergency-stop.js";
 import {
@@ -17,6 +18,7 @@ import {
 	registerPersonaIpc,
 	registerPolicyIpc,
 	registerTabIpc,
+	registerVaultIpc,
 } from "./ipc.js";
 import { PersonaManager } from "./persona-manager.js";
 import { createDefaultSlashRegistry } from "./slash-commands.js";
@@ -88,6 +90,7 @@ function createOrchestrator(deps: {
 	toolResultStorage: ToolResultStorage;
 	confirmation: ConfirmationHandler;
 	taskStore: TaskStateStore;
+	vault: AuthVault;
 }): AgentOrchestrator {
 	let activeHost: AgentHost | undefined;
 	let activeTaskId: string | undefined;
@@ -109,6 +112,7 @@ function createOrchestrator(deps: {
 					toolResultStorage: deps.toolResultStorage,
 					confirmation: deps.confirmation,
 					taskStore: deps.taskStore,
+					vault: deps.vault,
 				},
 				{ tabId, persona: use },
 			);
@@ -201,6 +205,7 @@ interface WindowInfra {
 	taskStore: TaskStateStore;
 	confirmation: ConfirmationHandler;
 	slashRegistry: ReturnType<typeof createDefaultSlashRegistry>;
+	vault: AuthVault;
 }
 
 function createWindowInfra(policy: PolicyProvider): WindowInfra {
@@ -232,12 +237,16 @@ function createWindowInfra(policy: PolicyProvider): WindowInfra {
 		askUser: async () => "denied",
 	});
 	const slashRegistry = createDefaultSlashRegistry();
+	const vault = new AuthVault({
+		filePath: path.join(userDataDir, "agent-browser", "vault.json"),
+	});
 	return {
 		auditLog,
 		toolResultStorage,
 		taskStore,
 		confirmation,
 		slashRegistry,
+		vault,
 	};
 }
 
@@ -279,9 +288,11 @@ async function createMainWindow(
 		toolResultStorage: infra.toolResultStorage,
 		confirmation: infra.confirmation,
 		taskStore: infra.taskStore,
+		vault: infra.vault,
 	});
 	const unregisterAgent = registerAgentIpc(orchestrator, () => win.webContents);
 	const unregisterSlash = registerSlashIpc(infra, tm, orchestrator);
+	const unregisterVault = registerVaultIpc(infra.vault);
 	const unregisterPersona = registerPersonaIpc({
 		personaManager,
 		getActiveSlug: () => activeSlug,
@@ -325,6 +336,7 @@ async function createMainWindow(
 		unregisterAgent();
 		unregisterPersona();
 		unregisterSlash();
+		unregisterVault();
 		ipcMain.removeHandler("tab:snapshotCurrent");
 		tm.destroy();
 	});
@@ -352,6 +364,7 @@ function registerSlashIpc(
 				taskStore: infra.taskStore,
 				auditLog: auditLogAdapter,
 				currentTaskId: orchestrator.getHost() ? "current" : undefined,
+				vault: infra.vault,
 				// tools: not wired here — slash /screenshot /dom-tree use tool invocations
 				// which require an active AgentHost; Stage 3 integration left as TODO.
 			},
