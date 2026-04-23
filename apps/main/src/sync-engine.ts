@@ -102,6 +102,8 @@ export class SyncEngine {
 			verifier,
 			lastBookmarksCursor: 0,
 			lastHistoryCursor: 0,
+			lastPushedBookmarkAt: 0,
+			lastPushedHistoryAt: 0,
 			serverUrl: serverUrl ?? this.cfg.serverUrl ?? null,
 		};
 		this.deps.configStore.save(this.cfg);
@@ -142,14 +144,20 @@ export class SyncEngine {
 	}
 
 	/**
-	 * Push ALL local bookmarks + newly recorded history since the last
-	 * cursor. History is append-only so its cursor is visited_at; bookmarks
-	 * always sync the full set (the set is small).
+	 * Push newly-added local bookmarks + newly-recorded history since the
+	 * last pushed cursor. Both streams are append-only from the push side:
+	 * once a row's timestamp ≤ its cursor, we skip it.
+	 *
+	 * Known limitation: bookmark title/position *edits* after initial push
+	 * won't resync because BookmarksStore has no updated_at column. When
+	 * that becomes a real issue, add `updated_at` to the schema and switch
+	 * this filter to `b.updated_at > cursor`.
 	 */
 	async pushNow(): Promise<{ pushed: number }> {
 		const key = this.requireUnlocked();
 		const items: EncryptedItem[] = [];
 		for (const b of this.deps.bookmarks.list()) {
+			if (b.created_at <= this.cfg.lastPushedBookmarkAt) continue;
 			items.push({
 				pointerId: itemPointer(key, `bookmark:${b.folder}:${b.url}`),
 				kind: "bookmark",
@@ -166,11 +174,8 @@ export class SyncEngine {
 				updatedAt: b.created_at,
 			});
 		}
-		// History: push rows newer than the last pushed visited_at cursor.
-		// NB: we push under the same "lastHistoryCursor" field — simpler than
-		// tracking pushed vs. pulled cursors separately.
 		for (const h of this.deps.history.list(10_000, 0)) {
-			if (h.visited_at <= this.cfg.lastHistoryCursor) continue;
+			if (h.visited_at <= this.cfg.lastPushedHistoryAt) continue;
 			items.push({
 				pointerId: itemPointer(key, `history:${h.visited_at}:${h.url}`),
 				kind: "history",
@@ -187,14 +192,26 @@ export class SyncEngine {
 		}
 		if (items.length === 0) return { pushed: 0 };
 		await this.deps.transport.push(items);
-		// Advance the cursor to the max visited_at we just pushed.
-		const maxVisited = items
-			.filter((i) => i.kind === "history")
-			.reduce((m, i) => (i.updatedAt > m ? i.updatedAt : m), 0);
-		if (maxVisited > this.cfg.lastHistoryCursor) {
-			this.cfg.lastHistoryCursor = maxVisited;
-			this.deps.configStore.save(this.cfg);
+		// Advance the per-kind push watermark. NB: these are independent of the
+		// pull cursors — advancing them here must not shrink the pull horizon.
+		let maxHistory = this.cfg.lastPushedHistoryAt;
+		let maxBookmark = this.cfg.lastPushedBookmarkAt;
+		for (const it of items) {
+			if (it.kind === "history" && it.updatedAt > maxHistory)
+				maxHistory = it.updatedAt;
+			if (it.kind === "bookmark" && it.updatedAt > maxBookmark)
+				maxBookmark = it.updatedAt;
 		}
+		let changed = false;
+		if (maxHistory > this.cfg.lastPushedHistoryAt) {
+			this.cfg.lastPushedHistoryAt = maxHistory;
+			changed = true;
+		}
+		if (maxBookmark > this.cfg.lastPushedBookmarkAt) {
+			this.cfg.lastPushedBookmarkAt = maxBookmark;
+			changed = true;
+		}
+		if (changed) this.deps.configStore.save(this.cfg);
 		return { pushed: items.length };
 	}
 

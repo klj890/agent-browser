@@ -18,8 +18,19 @@ export interface SyncConfig {
 	 * re-derived key; a successful decrypt proves the passphrase is correct.
 	 */
 	verifier: EnvelopeV1 | null;
+	/**
+	 * Server-returned cursors for the pull side. Opaque to us — we pass them
+	 * back verbatim on next pull.
+	 */
 	lastBookmarksCursor: number;
 	lastHistoryCursor: number;
+	/**
+	 * Local-only watermarks for the push side: max `created_at` of bookmarks
+	 * and max `visited_at` of history rows already uploaded. Split from the
+	 * pull cursors so pushing never truncates our pull horizon.
+	 */
+	lastPushedBookmarkAt: number;
+	lastPushedHistoryAt: number;
 	serverUrl: string | null;
 }
 
@@ -29,6 +40,8 @@ export const EMPTY_SYNC_CONFIG: SyncConfig = {
 	verifier: null,
 	lastBookmarksCursor: 0,
 	lastHistoryCursor: 0,
+	lastPushedBookmarkAt: 0,
+	lastPushedHistoryAt: 0,
 	serverUrl: null,
 };
 

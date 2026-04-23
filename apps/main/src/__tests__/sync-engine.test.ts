@@ -156,6 +156,42 @@ describe("SyncEngine.pushNow", () => {
 		db.close();
 		rmSync(tmp, { recursive: true, force: true });
 	});
+
+	it("second push skips bookmarks already pushed", async () => {
+		const { engine, db, bookmarks, transport, tmp } = mkEngine();
+		bookmarks.add({ url: "https://a/", title: "A" });
+		await engine.configure("p");
+		await engine.pushNow();
+		const first = transport.pushed.length;
+		bookmarks.add({ url: "https://b/", title: "B" });
+		await engine.pushNow();
+		const addedKinds = transport.pushed.slice(first).map((i) => i.kind);
+		expect(addedKinds).toEqual(["bookmark"]);
+		db.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("push watermarks are independent from pull cursors", async () => {
+		const { engine, db, bookmarks, transport, tmp } = mkEngine();
+		bookmarks.add({ url: "https://a/", title: "A" });
+		await engine.configure("p");
+		await engine.pushNow();
+		const s = engine.status();
+		// Push bumped only the push watermark; pull cursor still at zero.
+		expect(s.lastBookmarksCursor).toBe(0);
+		// Reach into cfg via status is indirect — we verify by simulating a
+		// pull: if push had corrupted the pull cursor, pullBookmarks would be
+		// called with a non-zero since. Our stub echoes it back; assert 0.
+		const calls: number[] = [];
+		transport.pullBookmarks = async (since: number) => {
+			calls.push(since);
+			return { items: [], cursor: 0 };
+		};
+		await engine.pullNow();
+		expect(calls).toEqual([0]);
+		db.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
 });
 
 describe("SyncEngine.pullNow", () => {
