@@ -13,6 +13,7 @@ import type { BookmarksStore } from "./bookmarks.js";
 import type { DownloadManager } from "./download.js";
 import type { ExtensionHost, InstalledExtension } from "./extension-host.js";
 import type { HistoryStore } from "./history.js";
+import type { McpServerHost } from "./mcp-server.js";
 import type { Persona, PersonaManager } from "./persona-manager.js";
 import type { ProfileRecord, ProfileStore } from "./profile-store.js";
 import {
@@ -439,6 +440,30 @@ export function registerSyncIpc(engine: SyncEngine): () => void {
 				return engine.updateServerUrl(u);
 			},
 		],
+	];
+	for (const [ch, fn] of handlers) ipcMain.handle(ch, fn);
+	return () => {
+		for (const [ch] of handlers) ipcMain.removeHandler(ch);
+	};
+}
+
+// ---------------------------------------------------------------------------
+// MCP server IPC (P2 Stage 17)
+// ---------------------------------------------------------------------------
+
+export function registerMcpIpc(host: McpServerHost): () => void {
+	const handlers: Array<[string, (...args: unknown[]) => unknown]> = [
+		["mcp:status", () => host.status()],
+		[
+			"mcp:enable",
+			async (_e, port: unknown) => {
+				const p =
+					typeof port === "number" && Number.isFinite(port) ? port : undefined;
+				return host.enable(p);
+			},
+		],
+		["mcp:disable", async () => host.disable()],
+		["mcp:regenerateToken", async () => host.regenerateToken()],
 	];
 	for (const [ch, fn] of handlers) ipcMain.handle(ch, fn);
 	return () => {

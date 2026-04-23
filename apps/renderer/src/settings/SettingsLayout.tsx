@@ -10,6 +10,7 @@ const NAV = [
 	{ to: "/settings/extensions", label: "Extensions" },
 	{ to: "/settings/vault", label: "Auth Vault" },
 	{ to: "/settings/sync", label: "Cloud Sync" },
+	{ to: "/settings/mcp", label: "MCP Server" },
 	{ to: "/settings/trace", label: "Trace" },
 	{ to: "/settings/routines", label: "Routines" },
 ] as const;

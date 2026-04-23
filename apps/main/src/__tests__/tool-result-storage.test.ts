@@ -74,20 +74,25 @@ describe("ToolResultStorage — listByTask", () => {
 });
 
 describe("ToolResultStorage — vacuumOlderThan", () => {
-	it("deletes only rows older than cutoff", async () => {
+	it("deletes only rows older than cutoff", () => {
 		const s = makeStorage({ thresholdBytes: 10 });
-		// row 1 — backdate via direct DB write
 		s.put("t1", "snapshot", { data: "a".repeat(100) });
-		// Manually age one row by mutating created_at via listByTask → direct SQL not exposed,
-		// so emulate via a second storage with clock shift: simpler to just test the
-		// boundary condition by calling vacuumOlderThan(0) (nothing older than now).
-		const removedZero = s.vacuumOlderThan(0);
-		expect(removedZero).toBeGreaterThanOrEqual(0);
-
-		// Large negative "days" => cutoff in the future => everything qualifies
-		const removedAll = s.vacuumOlderThan(-1);
-		expect(removedAll).toBe(1);
+		expect(s.listByTask("t1")).toHaveLength(1);
+		// Cutoff in the far future (-1 day) → every row qualifies.
+		// Previous test also called vacuumOlderThan(0) first for a "boundary"
+		// check, but that races millisecond Date.now() vs row.created_at on
+		// fast CI runners and sometimes deletes the row we're about to test.
+		expect(s.vacuumOlderThan(-1)).toBe(1);
 		expect(s.listByTask("t1")).toHaveLength(0);
+		s.close();
+	});
+
+	it("returns 0 when no rows are older than cutoff", () => {
+		const s = makeStorage({ thresholdBytes: 10 });
+		s.put("t1", "snapshot", { data: "a".repeat(100) });
+		// 30 days in the past → today's row is much newer, so nothing deleted.
+		expect(s.vacuumOlderThan(30)).toBe(0);
+		expect(s.listByTask("t1")).toHaveLength(1);
 		s.close();
 	});
 });

@@ -32,6 +32,7 @@ import {
 	registerDownloadsIpc,
 	registerExtensionsIpc,
 	registerHistoryIpc,
+	registerMcpIpc,
 	registerPersonaIpc,
 	registerPolicyIpc,
 	registerProfilesIpc,
@@ -42,6 +43,8 @@ import {
 	registerTraceIpc,
 	registerVaultIpc,
 } from "./ipc.js";
+import { McpConfigFileStore } from "./mcp-config.js";
+import { McpServerHost } from "./mcp-server.js";
 import { PersonaManager } from "./persona-manager.js";
 import { syncPersonasOnce } from "./persona-sync.js";
 import { ProfileStore } from "./profile-store.js";
@@ -486,6 +489,22 @@ async function createMainWindow(
 	});
 	const unregisterSync = registerSyncIpc(syncEngine);
 
+	// MCP server (Stage 17). Disabled by default; user toggles in Settings.
+	// If the persisted config already had enabled=true, the server won't auto-
+	// start here — we surface status via IPC and the renderer decides whether
+	// to auto-enable. Keeps loopback listeners from silently reappearing on
+	// every boot until the UI explicitly asks.
+	const mcpHost = new McpServerHost({
+		configStore: new McpConfigFileStore(
+			path.join(userDataDir, "agent-browser", "mcp-config.json"),
+		),
+		tabs: tm,
+		history: historyStore,
+		bookmarks: bookmarksStore,
+		auditLog: infra.auditLog,
+	});
+	const unregisterMcp = registerMcpIpc(mcpHost);
+
 	const unregisterProfiles = registerProfilesIpc(profileStore, {
 		onProfileRemoved: (partition) => {
 			// Close any tabs still using the removed partition, then purge the session.
@@ -586,6 +605,8 @@ async function createMainWindow(
 		unregisterExtensions();
 		unregisterSync();
 		syncEngine.lock();
+		unregisterMcp();
+		void mcpHost.disable();
 		ipcMain.removeHandler("tab:snapshotCurrent");
 		tm.destroy();
 	});

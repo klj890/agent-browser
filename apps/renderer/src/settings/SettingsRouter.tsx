@@ -4,6 +4,7 @@ import { BookmarksView } from "./bookmarks/BookmarksView";
 import { DownloadsView } from "./downloads/DownloadsView";
 import { ExtensionsView } from "./extensions/ExtensionsView";
 import { HistoryView } from "./history/HistoryView";
+import { McpView } from "./mcp/McpView";
 import { PersonasView } from "./personas/PersonasView";
 import { ProfilesView } from "./profiles/ProfilesView";
 import { RoutinesView } from "./routines/RoutinesView";
@@ -33,6 +34,7 @@ export function SettingsRouter({ onClose }: Props) {
 					<Route path="settings/extensions" element={<ExtensionsView />} />
 					<Route path="settings/vault" element={<VaultView />} />
 					<Route path="settings/sync" element={<SyncView />} />
+					<Route path="settings/mcp" element={<McpView />} />
 					<Route path="settings/trace" element={<TraceView />} />
 					<Route path="settings/routines" element={<RoutinesView />} />
 					<Route path="*" element={<Navigate to="/settings" replace />} />
