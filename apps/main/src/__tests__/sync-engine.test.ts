@@ -159,14 +159,47 @@ describe("SyncEngine.pushNow", () => {
 
 	it("second push skips bookmarks already pushed", async () => {
 		const { engine, db, bookmarks, transport, tmp } = mkEngine();
-		bookmarks.add({ url: "https://a/", title: "A" });
+		bookmarks.add({ url: "https://a/", title: "A", createdAt: 1 });
 		await engine.configure("p");
 		await engine.pushNow();
 		const first = transport.pushed.length;
-		bookmarks.add({ url: "https://b/", title: "B" });
+		bookmarks.add({ url: "https://b/", title: "B", createdAt: 2 });
 		await engine.pushNow();
 		const addedKinds = transport.pushed.slice(first).map((i) => i.kind);
 		expect(addedKinds).toEqual(["bookmark"]);
+		db.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("resyncs bookmark when an edit bumps updated_at", async () => {
+		const { engine, db, bookmarks, transport, tmp } = mkEngine();
+		bookmarks.add({ url: "https://a/", title: "Old", createdAt: 1 });
+		await engine.configure("p");
+		await engine.pushNow();
+		const first = transport.pushed.length;
+		// ON CONFLICT upsert: same url+folder, new title + later timestamp.
+		bookmarks.add({ url: "https://a/", title: "New", createdAt: 100 });
+		await engine.pushNow();
+		const added = transport.pushed.slice(first);
+		expect(added).toHaveLength(1);
+		expect(added[0]?.kind).toBe("bookmark");
+		expect(added[0]?.updatedAt).toBe(100);
+		db.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("paginates history larger than the internal batch size", async () => {
+		const { engine, db, history, transport, tmp } = mkEngine();
+		// Default internal batch is 1_000 — push 2_500 rows to force 3 pages.
+		for (let i = 1; i <= 2_500; i++) {
+			history.record(`https://ex/${i}`, `T${i}`, i);
+		}
+		await engine.configure("p");
+		const r = await engine.pushNow();
+		expect(r.pushed).toBe(2_500);
+		expect(transport.pushed.filter((i) => i.kind === "history").length).toBe(
+			2_500,
+		);
 		db.close();
 		rmSync(tmp, { recursive: true, force: true });
 	});

@@ -10,12 +10,15 @@ export interface Bookmark {
 	folder: string;
 	position: number;
 	created_at: number;
+	updated_at: number;
 }
 
 export interface AddBookmarkInput {
 	url: string;
 	title?: string;
 	folder?: string;
+	/** Mostly for tests — lets callers pin the timestamp used for both created_at (new rows) and updated_at. Defaults to Date.now(). */
+	createdAt?: number;
 }
 
 export class BookmarksStore {
@@ -25,7 +28,7 @@ export class BookmarksStore {
 		if (!input.url) throw new Error("bookmark url required");
 		const folder = input.folder ?? "";
 		const title = input.title ?? input.url;
-		const createdAt = Date.now();
+		const now = input.createdAt ?? Date.now();
 		const db = this.appDb.db;
 		const maxRow = db
 			.prepare(
@@ -33,13 +36,18 @@ export class BookmarksStore {
 			)
 			.get(folder) as { maxpos: number };
 		const position = (maxRow?.maxpos ?? -1) + 1;
+		// On insert: created_at = updated_at = now.
+		// On conflict: keep created_at, refresh title + updated_at so sync
+		// push can catch the edit via `updated_at > watermark`.
 		const info = db
 			.prepare(
-				`INSERT INTO bookmarks (url, title, folder, position, created_at)
-				 VALUES (?, ?, ?, ?, ?)
-				 ON CONFLICT(url, folder) DO UPDATE SET title = excluded.title`,
+				`INSERT INTO bookmarks (url, title, folder, position, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?)
+				 ON CONFLICT(url, folder) DO UPDATE
+				   SET title = excluded.title,
+				       updated_at = excluded.updated_at`,
 			)
-			.run(input.url, title, folder, position, createdAt);
+			.run(input.url, title, folder, position, now, now);
 		const id = Number(info.lastInsertRowid);
 		const row = db
 			.prepare(
