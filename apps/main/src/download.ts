@@ -93,6 +93,15 @@ export class DownloadManager {
 
 		let savePath = defaultPath;
 		if (this.askEveryTime) {
+			// Call preventDefault() BEFORE awaiting the save dialog. Without
+			// this, Electron's default download pipeline starts writing to
+			// `defaultPath` immediately while we're still awaiting user choice,
+			// which can race our subsequent `setSavePath` call.
+			try {
+				ev.preventDefault();
+			} catch {
+				/* ignore — some test stubs don't implement it */
+			}
 			const res = await this.deps.dialog.showSaveDialog({
 				defaultPath,
 				title: "Save file",
