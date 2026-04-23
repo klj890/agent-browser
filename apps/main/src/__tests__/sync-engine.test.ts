@@ -304,6 +304,64 @@ describe("SyncEngine.pullNow", () => {
 		rmSync(tmp, { recursive: true, force: true });
 	});
 
+	it("pullNow preserves remote updated_at so sync converges (no ping-pong)", async () => {
+		// Regression for Gemini review finding: if pullNow used Date.now()
+		// for the applied row's updated_at, every subsequent push from this
+		// device would re-send the row with an ever-advancing timestamp,
+		// creating an infinite multi-device sync loop.
+		//
+		// With remote updated_at preserved, the timestamp is stable across
+		// devices. There may still be a single bounce-back (this device has
+		// never pushed this row, so its watermark sits below 50) but the
+		// bounced item carries the ORIGINAL timestamp, so the peer treats
+		// it as unchanged and the protocol converges after one round-trip.
+		const { engine: B, db, bookmarks, transport, tmp } = mkEngine();
+		await B.configure("pass");
+
+		const peerDb = new AppDatabase(":memory:");
+		const peerBookmarks = new BookmarksStore(peerDb);
+		peerBookmarks.add({ url: "https://x/", title: "X", createdAt: 50 });
+		const aTransport = new InMemoryTransport();
+		const fs = require("node:fs");
+		fs.writeFileSync(
+			path.join(tmp, "a.json"),
+			fs.readFileSync(path.join(tmp, "sync-config.json"), "utf-8"),
+		);
+		const A = new SyncEngine({
+			configStore: new SyncConfigStore(path.join(tmp, "a.json")),
+			bookmarks: peerBookmarks,
+			history: new HistoryStore(peerDb),
+			appDb: peerDb,
+			transport: aTransport,
+			deriveKeyFn: fastDerive,
+		});
+		expect(await A.unlock("pass")).toBe(true);
+		await A.pushNow();
+
+		transport.bookmarks = aTransport.pushed.filter(
+			(i) => i.kind === "bookmark",
+		);
+		await B.pullNow();
+		expect(bookmarks.list()[0]?.updated_at).toBe(50);
+
+		// B's first push will echo the remote row back ONCE (first time B
+		// sees it for push purposes), but crucially with updatedAt=50, not
+		// Date.now(). That is what prevents an ever-incrementing cycle.
+		const before = transport.pushed.length;
+		await B.pushNow();
+		const echoed = transport.pushed.slice(before);
+		expect(echoed.length).toBe(1);
+		expect(echoed[0]?.updatedAt).toBe(50);
+
+		// Second B.pushNow is now a true no-op — watermark has absorbed the row.
+		const before2 = transport.pushed.length;
+		const r2 = await B.pushNow();
+		expect(r2.pushed).toBe(0);
+		expect(transport.pushed.length).toBe(before2);
+		db.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
 	it("skips items that decrypt-fail (wrong key / corrupt)", async () => {
 		const { engine, db, transport, tmp } = mkEngine();
 		await engine.configure("p");

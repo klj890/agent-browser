@@ -79,6 +79,29 @@ export class BookmarksStore {
 			.all(folder) as Bookmark[];
 	}
 
+	/**
+	 * Paginated incremental scan by `updated_at` for SyncEngine.pushNow.
+	 * Avoids loading the entire bookmark set into memory per push and lets
+	 * pagination keep working even when many bookmarks share a timestamp.
+	 * Uses (updated_at, id) as a compound cursor for the same reason the
+	 * history store does — SQL-side filtering, no post-fetch JS filter.
+	 */
+	listSince(
+		afterUpdatedAt: number,
+		afterId: number,
+		limit: number,
+	): Bookmark[] {
+		return this.appDb.db
+			.prepare(
+				`SELECT * FROM bookmarks
+				 WHERE updated_at > ?
+				    OR (updated_at = ? AND id > ?)
+				 ORDER BY updated_at ASC, id ASC
+				 LIMIT ?`,
+			)
+			.all(afterUpdatedAt, afterUpdatedAt, afterId, limit) as Bookmark[];
+	}
+
 	/** Reorder a folder: `ids` gives the new positional order. */
 	reorder(folder: string, ids: number[]): void {
 		const db = this.appDb.db;

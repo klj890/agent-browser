@@ -112,6 +112,7 @@ export class SyncEngine {
 			lastPushedBookmarkAt: 0,
 			lastPushedHistoryAt: 0,
 			lastPushedHistoryId: 0,
+			lastPushedBookmarkId: 0,
 			serverUrl: serverUrl ?? this.cfg.serverUrl ?? null,
 		};
 		this.deps.configStore.save(this.cfg);
@@ -152,56 +153,68 @@ export class SyncEngine {
 	}
 
 	/**
-	 * Push newly-added local bookmarks + newly-recorded history since the
-	 * last pushed cursor. Both streams are append-only from the push side:
-	 * once a row's timestamp ≤ its cursor, we skip it.
+	 * Push bookmarks + history rows that have changed since the last
+	 * watermark. Both streams paginate by a compound (timestamp, id) cursor
+	 * so rows sharing a timestamp never straddle a page boundary silently.
 	 *
-	 * Known limitation: bookmark title/position *edits* after initial push
-	 * won't resync because BookmarksStore has no updated_at column. When
-	 * that becomes a real issue, add `updated_at` to the schema and switch
-	 * this filter to `b.updated_at > cursor`.
+	 * Deletion is not yet synced — doing it correctly requires tombstones.
+	 * Documented in PLAN as follow-up work.
 	 */
 	async pushNow(): Promise<{ pushed: number }> {
 		const key = this.requireUnlocked();
 		const items: EncryptedItem[] = [];
-		// Bookmarks: filter by updated_at so edits (title / position / folder)
-		// also resync — BookmarksStore bumps updated_at on every upsert.
-		// Deletion is still not synced (needs tombstones); tracked for future.
-		for (const b of this.deps.bookmarks.list()) {
-			if (b.updated_at <= this.cfg.lastPushedBookmarkAt) continue;
-			items.push({
-				pointerId: itemPointer(key, `bookmark:${b.folder}:${b.url}`),
-				kind: "bookmark",
-				envelope: encrypt(
-					key,
-					JSON.stringify({
-						url: b.url,
-						title: b.title,
-						folder: b.folder,
-						position: b.position,
-						created_at: b.created_at,
-						updated_at: b.updated_at,
-					}),
-				),
-				updatedAt: b.updated_at,
-			});
-		}
-		// Paginate history by (visited_at, id) ascending so rows sharing a
-		// visited_at that straddle a page boundary still get picked up —
-		// without the id tiebreaker a `>` filter would drop them.
-		const HISTORY_PAGE = 1_000;
-		let cursorVisitedAt = this.cfg.lastPushedHistoryAt;
-		let cursorId = this.cfg.lastPushedHistoryId ?? 0;
+
+		const BOOKMARK_PAGE = 1_000;
+		let bmAt = this.cfg.lastPushedBookmarkAt;
+		let bmId = this.cfg.lastPushedBookmarkId ?? 0;
 		while (true) {
-			const batch = this.deps.history.listSince(
-				cursorVisitedAt,
-				cursorId,
-				HISTORY_PAGE,
-			);
+			const page = this.deps.bookmarks.listSince(bmAt, bmId, BOOKMARK_PAGE);
+			if (page.length === 0) break;
+			for (const b of page) {
+				items.push({
+					// JSON.stringify([folder, url]) gives a collision-free encoding:
+					// structural delimiters can't appear inside a JSON-escaped string,
+					// so "a:b"/"c" and "a"/"b:c" produce distinct pointerIds.
+					pointerId: itemPointer(
+						key,
+						`bookmark:${JSON.stringify([b.folder, b.url])}`,
+					),
+					kind: "bookmark",
+					envelope: encrypt(
+						key,
+						JSON.stringify({
+							url: b.url,
+							title: b.title,
+							folder: b.folder,
+							position: b.position,
+							created_at: b.created_at,
+							updated_at: b.updated_at,
+						}),
+					),
+					updatedAt: b.updated_at,
+				});
+				if (b.updated_at > bmAt || (b.updated_at === bmAt && b.id > bmId)) {
+					bmAt = b.updated_at;
+					bmId = b.id;
+				}
+			}
+			if (page.length < BOOKMARK_PAGE) break;
+		}
+
+		const HISTORY_PAGE = 1_000;
+		let hAt = this.cfg.lastPushedHistoryAt;
+		let hId = this.cfg.lastPushedHistoryId ?? 0;
+		while (true) {
+			const batch = this.deps.history.listSince(hAt, hId, HISTORY_PAGE);
 			if (batch.length === 0) break;
 			for (const h of batch) {
 				items.push({
-					pointerId: itemPointer(key, `history:${h.visited_at}:${h.url}`),
+					// Same JSON encoding rationale as bookmarks — url or title could
+					// legitimately contain ':', so string concat would collide.
+					pointerId: itemPointer(
+						key,
+						`history:${JSON.stringify([h.visited_at, h.url])}`,
+					),
 					kind: "history",
 					envelope: encrypt(
 						key,
@@ -213,38 +226,32 @@ export class SyncEngine {
 					),
 					updatedAt: h.visited_at,
 				});
-				// Advance compound cursor using strict ordering (visited_at asc, id asc).
-				if (
-					h.visited_at > cursorVisitedAt ||
-					(h.visited_at === cursorVisitedAt && h.id > cursorId)
-				) {
-					cursorVisitedAt = h.visited_at;
-					cursorId = h.id;
+				if (h.visited_at > hAt || (h.visited_at === hAt && h.id > hId)) {
+					hAt = h.visited_at;
+					hId = h.id;
 				}
 			}
 			if (batch.length < HISTORY_PAGE) break;
 		}
+
 		if (items.length === 0) return { pushed: 0 };
 		await this.deps.transport.push(items);
-		// Advance the per-kind push watermark. NB: these are independent of the
-		// pull cursors — advancing them here must not shrink the pull horizon.
-		let maxBookmark = this.cfg.lastPushedBookmarkAt;
-		for (const it of items) {
-			if (it.kind === "bookmark" && it.updatedAt > maxBookmark)
-				maxBookmark = it.updatedAt;
-		}
+
 		let changed = false;
-		if (cursorVisitedAt > this.cfg.lastPushedHistoryAt) {
-			this.cfg.lastPushedHistoryAt = cursorVisitedAt;
+		if (hAt > this.cfg.lastPushedHistoryAt) {
+			this.cfg.lastPushedHistoryAt = hAt;
 			changed = true;
 		}
-		const prevHistoryId = this.cfg.lastPushedHistoryId ?? 0;
-		if (cursorId !== prevHistoryId) {
-			this.cfg.lastPushedHistoryId = cursorId;
+		if ((this.cfg.lastPushedHistoryId ?? 0) !== hId) {
+			this.cfg.lastPushedHistoryId = hId;
 			changed = true;
 		}
-		if (maxBookmark > this.cfg.lastPushedBookmarkAt) {
-			this.cfg.lastPushedBookmarkAt = maxBookmark;
+		if (bmAt > this.cfg.lastPushedBookmarkAt) {
+			this.cfg.lastPushedBookmarkAt = bmAt;
+			changed = true;
+		}
+		if ((this.cfg.lastPushedBookmarkId ?? 0) !== bmId) {
+			this.cfg.lastPushedBookmarkId = bmId;
 			changed = true;
 		}
 		if (changed) this.deps.configStore.save(this.cfg);
@@ -281,12 +288,18 @@ export class SyncEngine {
 						url: string;
 						title?: string;
 						folder?: string;
+						updated_at?: number;
 					};
-					// BookmarksStore.add upserts on (url, folder) conflict → LWW.
+					// Preserve the remote updated_at on local insert/upsert.
+					// Without this, add() would stamp Date.now() which is always
+					// greater than our push watermark, and the next pushNow() would
+					// ping-pong the same row back to the server (infinite loop
+					// between two devices synchronizing a common bookmark set).
 					this.deps.bookmarks.add({
 						url: row.url,
 						title: row.title,
 						folder: row.folder,
+						createdAt: row.updated_at ?? it.updatedAt,
 					});
 					applied++;
 				} catch {
