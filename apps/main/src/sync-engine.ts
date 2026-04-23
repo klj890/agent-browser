@@ -60,6 +60,17 @@ export interface SyncStatus {
 	serverUrl: string | null;
 }
 
+/**
+ * A transport is either a fixed instance (simplest, works for tests) or a
+ * factory that maps the current `serverUrl` (may be null for "no server
+ * configured yet") to a transport instance. The factory form lets users
+ * change `sync:configure(serverUrl)` at runtime and have the next push/pull
+ * automatically route to the new host — no app restart.
+ */
+export type SyncTransportResolver =
+	| SyncTransport
+	| ((serverUrl: string | null) => SyncTransport);
+
 export interface SyncEngineDeps {
 	configStore: SyncConfigStore;
 	bookmarks: BookmarksStore;
@@ -70,7 +81,7 @@ export interface SyncEngineDeps {
 	 * overhead and makes an interrupted pull atomic (all or nothing).
 	 */
 	appDb: AppDatabase;
-	transport: SyncTransport;
+	transport: SyncTransportResolver;
 	/** Test hook to swap in a faster key derivation during tests. */
 	deriveKeyFn?: (passphrase: string, salt: Buffer) => Promise<Buffer>;
 }
@@ -78,9 +89,32 @@ export interface SyncEngineDeps {
 export class SyncEngine {
 	private key: Buffer | null = null;
 	private cfg: SyncConfig;
+	/** Memoized transport for the current serverUrl — rebuilt on config change. */
+	private cachedTransport?: { forUrl: string | null; impl: SyncTransport };
 
 	constructor(private readonly deps: SyncEngineDeps) {
 		this.cfg = deps.configStore.load();
+	}
+
+	/**
+	 * Resolve the transport to use for the current cfg.serverUrl. When the
+	 * caller supplied a static transport instance we always return it. When
+	 * they supplied a factory we memoize by serverUrl so a cold
+	 * `push / pull` doesn't re-construct the HTTP client each call.
+	 */
+	private transport(): SyncTransport {
+		const r = this.deps.transport;
+		if (typeof r !== "function") return r;
+		const current = this.cfg.serverUrl ?? null;
+		if (!this.cachedTransport || this.cachedTransport.forUrl !== current) {
+			this.cachedTransport = { forUrl: current, impl: r(current) };
+		}
+		return this.cachedTransport.impl;
+	}
+
+	/** Drop the memoized transport (e.g. after configure()'s serverUrl change). */
+	private invalidateTransport(): void {
+		this.cachedTransport = undefined;
 	}
 
 	status(): SyncStatus {
@@ -116,7 +150,24 @@ export class SyncEngine {
 			serverUrl: serverUrl ?? this.cfg.serverUrl ?? null,
 		};
 		this.deps.configStore.save(this.cfg);
+		this.invalidateTransport();
 		this.key = key;
+	}
+
+	/**
+	 * Update the sync server URL without wiping keys / cursors. Intended for
+	 * the settings UI "change server" flow: user already configured and has
+	 * outstanding history/bookmark state, but wants to point at a different
+	 * backend. The next push/pull will materialize a transport for the new URL.
+	 */
+	updateServerUrl(serverUrl: string | null): SyncStatus {
+		if ((this.cfg.serverUrl ?? null) === (serverUrl ?? null)) {
+			return this.status();
+		}
+		this.cfg.serverUrl = serverUrl;
+		this.deps.configStore.save(this.cfg);
+		this.invalidateTransport();
+		return this.status();
 	}
 
 	/**
@@ -235,7 +286,7 @@ export class SyncEngine {
 		}
 
 		if (items.length === 0) return { pushed: 0 };
-		await this.deps.transport.push(items);
+		await this.transport().push(items);
 
 		let changed = false;
 		if (hAt > this.cfg.lastPushedHistoryAt) {
@@ -267,12 +318,9 @@ export class SyncEngine {
 		let applied = 0;
 		let skipped = 0;
 
-		const bm = await this.deps.transport.pullBookmarks(
-			this.cfg.lastBookmarksCursor,
-		);
-		const hist = await this.deps.transport.pullHistory(
-			this.cfg.lastHistoryCursor,
-		);
+		const tp = this.transport();
+		const bm = await tp.pullBookmarks(this.cfg.lastBookmarksCursor);
+		const hist = await tp.pullHistory(this.cfg.lastHistoryCursor);
 
 		// Apply all decrypted rows in a single transaction: ~O(N) fsyncs
 		// collapse into one, and a crash mid-apply leaves the DB clean

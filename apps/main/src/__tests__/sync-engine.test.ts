@@ -5,7 +5,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BookmarksStore } from "../bookmarks.js";
 import { HistoryStore } from "../history.js";
 import { AppDatabase } from "../storage/sqlite.js";
@@ -382,6 +382,132 @@ describe("SyncEngine.pullNow", () => {
 		const r = await engine.pullNow();
 		expect(r.applied).toBe(0);
 		expect(r.skipped).toBeGreaterThanOrEqual(1);
+		db.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+});
+
+describe("SyncEngine dynamic transport", () => {
+	function mkDynEngine(factory: (url: string | null) => SyncTransport): {
+		engine: SyncEngine;
+		db: AppDatabase;
+		bookmarks: BookmarksStore;
+		history: HistoryStore;
+		tmp: string;
+	} {
+		const tmp = mkdtempSync(path.join(tmpdir(), "sync-dyn-"));
+		const db = new AppDatabase(":memory:");
+		const bookmarks = new BookmarksStore(db);
+		const history = new HistoryStore(db);
+		const configStore = new SyncConfigStore(path.join(tmp, "sync-config.json"));
+		const engine = new SyncEngine({
+			configStore,
+			bookmarks,
+			history,
+			appDb: db,
+			transport: factory,
+			deriveKeyFn: fastDerive,
+		});
+		return { engine, db, bookmarks, history, tmp };
+	}
+
+	it("factory receives current serverUrl; memoizes per url", async () => {
+		const calls: Array<string | null> = [];
+		const factory = (url: string | null) => {
+			calls.push(url);
+			return new InMemoryTransport();
+		};
+		const { engine, db, history, tmp } = mkDynEngine(factory);
+		history.record("https://a/", "A", 1);
+		await engine.configure("p", "https://srv1.test");
+		await engine.pushNow();
+		await engine.pushNow();
+		// Two pushes, same serverUrl → factory invoked exactly once.
+		expect(calls).toEqual(["https://srv1.test"]);
+		db.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("updateServerUrl invalidates the transport so next call gets a fresh one", async () => {
+		const calls: Array<string | null> = [];
+		const factory = (url: string | null) => {
+			calls.push(url);
+			return new InMemoryTransport();
+		};
+		const { engine, db, history, tmp } = mkDynEngine(factory);
+		history.record("https://a/", "A", 1);
+		await engine.configure("p", "https://srv1.test");
+		await engine.pushNow(); // factory call #1 (srv1)
+
+		const s = engine.updateServerUrl("https://srv2.test");
+		expect(s.serverUrl).toBe("https://srv2.test");
+
+		history.record("https://b/", "B", 2);
+		await engine.pushNow(); // factory call #2 (srv2)
+		expect(calls).toEqual(["https://srv1.test", "https://srv2.test"]);
+		db.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("updateServerUrl(null) returns NoopSyncTransport path — push no-op after next reconfigure", async () => {
+		const calls: Array<string | null> = [];
+		const factory = (url: string | null) => {
+			calls.push(url);
+			return new InMemoryTransport();
+		};
+		const { engine, db, history, tmp } = mkDynEngine(factory);
+		history.record("https://a/", "A", 1);
+		await engine.configure("p", "https://srv1.test");
+		await engine.pushNow();
+		engine.updateServerUrl(null);
+		// Second push resolves a fresh transport for url=null.
+		history.record("https://b/", "B", 2);
+		await engine.pushNow();
+		expect(calls).toEqual(["https://srv1.test", null]);
+		db.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("updateServerUrl with same value is a no-op — no transport rebuild", async () => {
+		const calls: Array<string | null> = [];
+		const factory = (url: string | null) => {
+			calls.push(url);
+			return new InMemoryTransport();
+		};
+		const { engine, db, history, tmp } = mkDynEngine(factory);
+		history.record("https://a/", "A", 1);
+		await engine.configure("p", "https://same.test");
+		await engine.pushNow();
+		engine.updateServerUrl("https://same.test");
+		history.record("https://b/", "B", 2);
+		await engine.pushNow();
+		expect(calls).toEqual(["https://same.test"]);
+		db.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("static transport form (non-function) is always used regardless of cfg", async () => {
+		const transport = new InMemoryTransport();
+		const tmp = mkdtempSync(path.join(tmpdir(), "sync-dyn-static-"));
+		const db = new AppDatabase(":memory:");
+		const history = new HistoryStore(db);
+		const engine = new SyncEngine({
+			configStore: new SyncConfigStore(path.join(tmp, "sync-config.json")),
+			bookmarks: new BookmarksStore(db),
+			history,
+			appDb: db,
+			transport,
+			deriveKeyFn: fastDerive,
+		});
+		await engine.configure("p", "https://whatever.test");
+		history.record("https://a/", "A", 1);
+		await engine.pushNow();
+		engine.updateServerUrl("https://different.test");
+		history.record("https://b/", "B", 2);
+		await engine.pushNow();
+		// Both pushes land on the same static instance — updateServerUrl
+		// cannot rebuild a static transport.
+		expect(transport.pushed.length).toBe(2);
 		db.close();
 		rmSync(tmp, { recursive: true, force: true });
 	});

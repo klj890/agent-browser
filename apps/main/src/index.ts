@@ -423,23 +423,24 @@ async function createMainWindow(
 	});
 
 	// E2E sync (Stage 16). Passphrase-derived key lives only in engine memory.
+	// Transport is resolved lazily via a factory so updateServerUrl()/configure()
+	// can repoint at a new backend without an app restart.
 	const syncConfigStore = new SyncConfigStore(
 		path.join(userDataDir, "agent-browser", "sync-config.json"),
 	);
-	const syncCfgSnapshot = syncConfigStore.load();
-	const syncTransport = syncCfgSnapshot.serverUrl
-		? new HttpSyncTransport({
-				baseUrl: syncCfgSnapshot.serverUrl,
-				// Reuse an existing persona auth token if stored under this vault key.
-				getAuthToken: () => null,
-			})
-		: new NoopSyncTransport();
 	const syncEngine = new SyncEngine({
 		configStore: syncConfigStore,
 		bookmarks: bookmarksStore,
 		history: historyStore,
 		appDb,
-		transport: syncTransport,
+		transport: (serverUrl) => {
+			if (!serverUrl) return new NoopSyncTransport();
+			return new HttpSyncTransport({
+				baseUrl: serverUrl,
+				// Reuse an existing persona auth token if stored under this vault key.
+				getAuthToken: () => null,
+			});
+		},
 	});
 	const unregisterSync = registerSyncIpc(syncEngine);
 

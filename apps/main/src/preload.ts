@@ -54,6 +54,8 @@ contextBridge.exposeInMainWorld("agentBrowser", {
 		disable: () => ipcRenderer.invoke("sync:disable"),
 		pushNow: () => ipcRenderer.invoke("sync:pushNow"),
 		pullNow: () => ipcRenderer.invoke("sync:pullNow"),
+		updateServerUrl: (serverUrl: string | null) =>
+			ipcRenderer.invoke("sync:updateServerUrl", serverUrl),
 	},
 	policy: {
 		get: () => ipcRenderer.invoke("policy:get"),
