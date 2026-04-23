@@ -20,6 +20,7 @@
  *     surfaces the failure via the returned `failed[]` array but keeps
  *     going (other extensions still load).
  */
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -86,6 +87,16 @@ export class ExtensionHost {
 	/**
 	 * Install an unpacked MV3 extension from a folder. Validates the manifest
 	 * before calling into Electron to give a clean error for common mistakes.
+	 *
+	 * Whitelist enforcement (allowedExtensionIds non-empty):
+	 *   - If manifest.key is present, compute the Chromium-style extension ID
+	 *     deterministically (sha256 of pubkey, first 16 bytes → a–p chars) and
+	 *     validate against the whitelist BEFORE loadExtension — this prevents
+	 *     background scripts from running even briefly for rejected IDs.
+	 *   - If manifest.key is absent we cannot know the ID until after Chromium
+	 *     assigns one, so we refuse to install rather than silently fall back
+	 *     to the race-prone load-then-remove flow. Users must add a signed
+	 *     manifest.key to their unpacked extension or disable the whitelist.
 	 */
 	async install(folderPath: string): Promise<InstalledExtension> {
 		if (!existsSync(folderPath)) {
@@ -99,16 +110,34 @@ export class ExtensionHost {
 		}
 		const policy = this.getPolicy();
 		this.guardPolicyBeforeLoad(policy);
+		if (policy.allowedExtensionIds.length > 0) {
+			const preId = manifest.key ? chromiumIdFromKey(manifest.key) : null;
+			if (preId == null) {
+				throw new Error(
+					"extension manifest has no 'key' field — cannot validate against " +
+						"allowedExtensionIds before loading. Add a signed key to the " +
+						"manifest or disable the whitelist.",
+				);
+			}
+			if (!policy.allowedExtensionIds.includes(preId)) {
+				throw new Error(
+					`extension id ${preId} is not in admin allowedExtensionIds`,
+				);
+			}
+		}
 		const ext = await this.session.loadExtension(folderPath, {
 			allowFileAccess: false,
 		});
-		if (policy.allowedExtensionIds.length > 0) {
-			if (!policy.allowedExtensionIds.includes(ext.id)) {
-				this.session.removeExtension(ext.id);
-				throw new Error(
-					`extension id ${ext.id} is not in admin allowedExtensionIds`,
-				);
-			}
+		if (
+			policy.allowedExtensionIds.length > 0 &&
+			!policy.allowedExtensionIds.includes(ext.id)
+		) {
+			// Defense-in-depth: the pre-validated id from manifest.key should
+			// match ext.id, but double-check in case Chromium's derivation drifts.
+			this.session.removeExtension(ext.id);
+			throw new Error(
+				`extension id ${ext.id} (post-load) is not in admin allowedExtensionIds`,
+			);
 		}
 		const record: InstalledExtension = {
 			id: ext.id,
@@ -233,6 +262,7 @@ function readManifest(folder: string): {
 	name: string;
 	version: string;
 	manifest_version?: number;
+	key?: string;
 } {
 	const p = path.join(folder, "manifest.json");
 	if (!existsSync(p)) {
@@ -249,11 +279,36 @@ function readManifest(folder: string): {
 	const name = typeof parsed.name === "string" ? parsed.name : "";
 	const version = typeof parsed.version === "string" ? parsed.version : "";
 	const mv = parsed.manifest_version;
+	const key = typeof parsed.key === "string" ? parsed.key : undefined;
 	return {
 		name,
 		version,
 		manifest_version: typeof mv === "number" ? mv : undefined,
+		key,
 	};
+}
+
+/**
+ * Derive the Chromium extension ID from the base64-encoded public key in
+ * `manifest.key`. Chromium hashes the pubkey with SHA-256 and encodes the
+ * first 16 bytes as 32 chars in the alphabet 'a'..'p' (each nibble + 'a').
+ * This matches the IDs users see in chrome://extensions.
+ */
+function chromiumIdFromKey(keyB64: string): string | null {
+	try {
+		const pubkey = Buffer.from(keyB64, "base64");
+		if (pubkey.length === 0) return null;
+		const hash = createHash("sha256").update(pubkey).digest();
+		let id = "";
+		for (let i = 0; i < 16; i++) {
+			const b = hash[i] ?? 0;
+			id += String.fromCharCode(97 + (b >> 4));
+			id += String.fromCharCode(97 + (b & 0xf));
+		}
+		return id;
+	} catch {
+		return null;
+	}
 }
 
 function isInstalledRecord(v: unknown): v is InstalledExtension {

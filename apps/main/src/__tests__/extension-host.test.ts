@@ -151,17 +151,62 @@ describe("ExtensionHost.install", () => {
 		);
 	});
 
-	it("removes the extension if id not in allowedExtensionIds", async () => {
+	it("rejects pre-load when manifest.key is absent and whitelist is set", async () => {
+		const extDir = mkTmp("nokey");
+		tmpDirs.push(extDir);
+		writeManifest(extDir); // no key
+		const { host, session } = mkHost({
+			policy: { allowMv3: true, allowedExtensionIds: ["only-this"] },
+		});
+		await expect(host.install(extDir)).rejects.toThrow(/no 'key' field/);
+		// loadExtension must never have been called — background scripts can
+		// not have run even momentarily.
+		expect(session.loaded.size).toBe(0);
+	});
+
+	it("rejects pre-load when manifest.key id is not in whitelist", async () => {
 		const extDir = mkTmp("notwhitelisted");
 		tmpDirs.push(extDir);
-		writeManifest(extDir, { id: "rogue" });
+		// A real secp-style pubkey would be ~550 base64 chars; any non-empty
+		// blob works — the id is deterministic sha256 of its bytes.
+		writeManifest(extDir, {
+			key: Buffer.from("rogue-pubkey").toString("base64"),
+		});
 		const { host, session } = mkHost({
 			policy: { allowMv3: true, allowedExtensionIds: ["only-this"] },
 		});
 		await expect(host.install(extDir)).rejects.toThrow(
 			/not in admin allowedExtensionIds/,
 		);
-		expect(session.loaded.has("rogue")).toBe(false);
+		expect(session.loaded.size).toBe(0);
+	});
+
+	it("accepts pre-load when manifest.key id is in whitelist", async () => {
+		const extDir = mkTmp("whitelisted");
+		tmpDirs.push(extDir);
+		const keyB64 = Buffer.from("ok-pubkey").toString("base64");
+		writeManifest(extDir, { key: keyB64 });
+		// Pre-compute the expected id the same way the host does.
+		const { createHash } = await import("node:crypto");
+		const hash = createHash("sha256")
+			.update(Buffer.from(keyB64, "base64"))
+			.digest();
+		let expectedId = "";
+		for (let i = 0; i < 16; i++) {
+			const b = hash[i] ?? 0;
+			expectedId += String.fromCharCode(97 + (b >> 4));
+			expectedId += String.fromCharCode(97 + (b & 0xf));
+		}
+		const { host, session } = mkHost({
+			policy: { allowMv3: true, allowedExtensionIds: [expectedId] },
+		});
+		// The fake session assigns ids from manifest.id if present, else ext<N>.
+		// We piggyback on that by writing manifest.id = expectedId so the
+		// post-load double-check also succeeds against the same id.
+		writeManifest(extDir, { key: keyB64, id: expectedId });
+		const rec = await host.install(extDir);
+		expect(rec.id).toBe(expectedId);
+		expect(session.loaded.has(expectedId)).toBe(true);
 	});
 
 	it("re-install replaces existing record of same id", async () => {
