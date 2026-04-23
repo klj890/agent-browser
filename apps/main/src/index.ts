@@ -1,6 +1,14 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, BrowserWindow, globalShortcut, ipcMain } from "electron";
+import {
+	app,
+	BrowserWindow,
+	dialog,
+	globalShortcut,
+	ipcMain,
+	session,
+	shell,
+} from "electron";
 import {
 	type AdminPolicy,
 	AdminPolicyStore,
@@ -9,17 +17,41 @@ import {
 import type { AgentHost, StreamChunk } from "./agent-host.js";
 import { createAgentHostForTab } from "./agent-host-factory.js";
 import { AuditLog } from "./audit-log.js";
+import { AuthVault } from "./auth-vault.js";
+import { BookmarksStore } from "./bookmarks.js";
 import { ConfirmationHandler } from "./confirmation.js";
+import { DownloadManager } from "./download.js";
 import { registerEmergencyStop } from "./emergency-stop.js";
+import { ExtensionHost, type ExtensionSessionLike } from "./extension-host.js";
+import { HistoryStore } from "./history.js";
+import { HistoryIndex } from "./history-index.js";
 import {
 	type AgentOrchestrator,
 	registerAgentIpc,
+	registerBookmarksIpc,
+	registerDownloadsIpc,
+	registerExtensionsIpc,
+	registerHistoryIpc,
 	registerPersonaIpc,
 	registerPolicyIpc,
+	registerProfilesIpc,
+	registerReadingIpc,
+	registerRoutinesIpc,
+	registerSyncIpc,
 	registerTabIpc,
+	registerTraceIpc,
+	registerVaultIpc,
 } from "./ipc.js";
 import { PersonaManager } from "./persona-manager.js";
+import { syncPersonasOnce } from "./persona-sync.js";
+import { ProfileStore } from "./profile-store.js";
+import { createRedactionPipelineFromPolicy } from "./redaction-pipeline.js";
+import { RoutinesEngine } from "./routines.js";
 import { createDefaultSlashRegistry } from "./slash-commands.js";
+import { getAppDatabase } from "./storage/sqlite.js";
+import { SyncConfigStore } from "./sync-config.js";
+import { SyncEngine } from "./sync-engine.js";
+import { HttpSyncTransport, NoopSyncTransport } from "./sync-transport-http.js";
 import type { TabManager as TabManagerType } from "./tab-manager.js";
 import { TabManager } from "./tab-manager.js";
 import { TaskStateStore } from "./task-state.js";
@@ -79,7 +111,7 @@ async function initPersonaManager(): Promise<PersonaManager> {
  * while a task runs are queued behind the current one via simple serialisation.
  * Multi-tab concurrency is a Stage 4+ concern.
  */
-function createOrchestrator(deps: {
+interface OrchestratorDeps {
 	tabManager: TabManager;
 	policy: PolicyProvider;
 	personaManager: PersonaManager;
@@ -88,101 +120,126 @@ function createOrchestrator(deps: {
 	toolResultStorage: ToolResultStorage;
 	confirmation: ConfirmationHandler;
 	taskStore: TaskStateStore;
-}): AgentOrchestrator {
-	let activeHost: AgentHost | undefined;
-	let activeTaskId: string | undefined;
-	return {
-		async startTask(prompt: string, target: (chunk: StreamChunk) => void) {
-			const tabId = deps.tabManager.getActiveId();
-			if (!tabId) throw new Error("no active tab");
-			const slug = deps.getActiveSlug();
-			const persona = slug ? deps.personaManager.getBySlug(slug) : undefined;
-			const first = deps.personaManager.list()[0];
-			const use = persona ?? first;
-			if (!use) throw new Error("no persona registered");
-			const host = await createAgentHostForTab(
-				{
-					tabManager: deps.tabManager,
-					policy: deps.policy.get(),
-					personaManager: deps.personaManager,
-					auditLog: deps.auditLog,
-					toolResultStorage: deps.toolResultStorage,
-					confirmation: deps.confirmation,
-					taskStore: deps.taskStore,
-				},
-				{ tabId, persona: use },
-			);
-			activeHost = host;
-			const task = deps.taskStore.create({
-				prompt,
-				persona: use.slug,
-				tabId,
+	vault: AuthVault;
+}
+
+/**
+ * Run one Agent task start-to-end against the currently active tab.
+ * Returns the TaskId; drives the stream on its own. When `trackActive` is
+ * non-null the caller's {host,taskId} slot receives the live values so
+ * UI concerns (cancel / getHost) work — for background routines the slot
+ * stays null and the task runs in isolation without clobbering any
+ * user-initiated session.
+ */
+async function runOneTask(
+	deps: OrchestratorDeps,
+	prompt: string,
+	target: (chunk: StreamChunk) => void,
+	trackActive: { host?: AgentHost; taskId?: string } | null,
+): Promise<string> {
+	const tabId = deps.tabManager.getActiveId();
+	if (!tabId) throw new Error("no active tab");
+	const slug = deps.getActiveSlug();
+	const persona = slug ? deps.personaManager.getBySlug(slug) : undefined;
+	const first = deps.personaManager.list()[0];
+	const use = persona ?? first;
+	if (!use) throw new Error("no persona registered");
+	const host = await createAgentHostForTab(
+		{
+			tabManager: deps.tabManager,
+			policy: deps.policy.get(),
+			personaManager: deps.personaManager,
+			auditLog: deps.auditLog,
+			toolResultStorage: deps.toolResultStorage,
+			confirmation: deps.confirmation,
+			taskStore: deps.taskStore,
+			vault: deps.vault,
+		},
+		{ tabId, persona: use },
+	);
+	if (trackActive) trackActive.host = host;
+	const task = deps.taskStore.create({
+		prompt,
+		persona: use.slug,
+		tabId,
+	});
+	const taskId = task.id;
+	if (trackActive) trackActive.taskId = taskId;
+	void deps.auditLog.append({
+		event: "task.start",
+		ts: Date.now(),
+		task_id: taskId,
+		user_prompt_hash: String(prompt.length),
+		persona: use.slug,
+		tab_url: deps.tabManager.list().find((t) => t.id === tabId)?.url ?? "",
+	});
+	deps.taskStore.transition(taskId, "running");
+	void (async () => {
+		let endReason: "completed" | "failed" | "killed" | "budget_exceeded" =
+			"completed";
+		try {
+			for await (const chunk of host.run(prompt, task.abortController.signal)) {
+				target(chunk);
+				if (chunk.type === "done") endReason = chunk.reason;
+			}
+		} catch (err) {
+			endReason = "failed";
+			target({
+				type: "error",
+				message: err instanceof Error ? err.message : String(err),
+				reason: "failed",
 			});
-			const taskId = task.id;
-			activeTaskId = taskId;
+			target({ type: "done", reason: "failed" });
+		} finally {
+			try {
+				deps.taskStore.transition(taskId, endReason);
+			} catch {
+				// already terminal
+			}
+			const finalTask = deps.taskStore.get(taskId);
+			const endStatus: "completed" | "failed" | "killed" | "budget_exceeded" =
+				finalTask.status === "pending" || finalTask.status === "running"
+					? "failed"
+					: finalTask.status;
 			void deps.auditLog.append({
-				event: "task.start",
+				event: "task.end",
 				ts: Date.now(),
 				task_id: taskId,
-				user_prompt_hash: String(prompt.length),
-				persona: use.slug,
-				tab_url: deps.tabManager.list().find((t) => t.id === tabId)?.url ?? "",
+				status: endStatus,
+				steps: finalTask.step ?? 0,
+				total_usd: finalTask.totalUsd ?? 0,
+				total_tokens: finalTask.totalTokens ?? 0,
 			});
-			deps.taskStore.transition(taskId, "running");
-			// Drive the stream in background; caller returns immediately with taskId.
-			void (async () => {
-				let endReason: "completed" | "failed" | "killed" | "budget_exceeded" =
-					"completed";
-				try {
-					for await (const chunk of host.run(
-						prompt,
-						task.abortController.signal,
-					)) {
-						target(chunk);
-						if (chunk.type === "done") endReason = chunk.reason;
-					}
-				} catch (err) {
-					endReason = "failed";
-					target({
-						type: "error",
-						message: err instanceof Error ? err.message : String(err),
-						reason: "failed",
-					});
-					target({ type: "done", reason: "failed" });
-				} finally {
-					try {
-						deps.taskStore.transition(taskId, endReason);
-					} catch {
-						// already terminal (e.g. aborted → killed)
-					}
-					const finalTask = deps.taskStore.get(taskId);
-					const endStatus:
-						| "completed"
-						| "failed"
-						| "killed"
-						| "budget_exceeded" =
-						finalTask.status === "pending" || finalTask.status === "running"
-							? "failed"
-							: finalTask.status;
-					void deps.auditLog.append({
-						event: "task.end",
-						ts: Date.now(),
-						task_id: taskId,
-						status: endStatus,
-						steps: finalTask.step ?? 0,
-						total_usd: finalTask.totalUsd ?? 0,
-						total_tokens: finalTask.totalTokens ?? 0,
-					});
-					if (activeTaskId === taskId) {
-						activeHost = undefined;
-						activeTaskId = undefined;
-					}
-				}
-			})();
-			return taskId;
+			if (trackActive && trackActive.taskId === taskId) {
+				trackActive.host = undefined;
+				trackActive.taskId = undefined;
+			}
+		}
+	})();
+	return taskId;
+}
+
+function createOrchestrator(deps: OrchestratorDeps): AgentOrchestrator & {
+	startBackgroundTask: (
+		prompt: string,
+		target: (chunk: StreamChunk) => void,
+	) => Promise<string>;
+} {
+	const active: { host?: AgentHost; taskId?: string } = {};
+	return {
+		async startTask(prompt: string, target: (chunk: StreamChunk) => void) {
+			return runOneTask(deps, prompt, target, active);
+		},
+		// Routines run here: no `active` slot → user's sidebar session is never
+		// clobbered. cancel() / getHost() only ever see UI-origin tasks.
+		async startBackgroundTask(
+			prompt: string,
+			target: (chunk: StreamChunk) => void,
+		) {
+			return runOneTask(deps, prompt, target, null);
 		},
 		cancel(taskId: string) {
-			if (activeTaskId === taskId) activeHost?.cancel();
+			if (active.taskId === taskId) active.host?.cancel();
 			try {
 				deps.taskStore.abort(taskId);
 			} catch {
@@ -190,7 +247,7 @@ function createOrchestrator(deps: {
 			}
 		},
 		getHost() {
-			return activeHost;
+			return active.host;
 		},
 	};
 }
@@ -201,6 +258,7 @@ interface WindowInfra {
 	taskStore: TaskStateStore;
 	confirmation: ConfirmationHandler;
 	slashRegistry: ReturnType<typeof createDefaultSlashRegistry>;
+	vault: AuthVault;
 }
 
 function createWindowInfra(policy: PolicyProvider): WindowInfra {
@@ -232,12 +290,16 @@ function createWindowInfra(policy: PolicyProvider): WindowInfra {
 		askUser: async () => "denied",
 	});
 	const slashRegistry = createDefaultSlashRegistry();
+	const vault = new AuthVault({
+		filePath: path.join(userDataDir, "agent-browser", "vault.json"),
+	});
 	return {
 		auditLog,
 		toolResultStorage,
 		taskStore,
 		confirmation,
 		slashRegistry,
+		vault,
 	};
 }
 
@@ -264,12 +326,155 @@ async function createMainWindow(
 		await win.loadFile(path.join(__dirname, "../../renderer/dist/index.html"));
 	}
 
-	const tm = new TabManager({ window: win });
+	// Persistent stores (Stage 1.5 / 1.6 / P1-12).
+	const userDataDir = app.getPath("userData");
+	const appDb = getAppDatabase(
+		path.join(userDataDir, "agent-browser", "app.sqlite"),
+	);
+	const historyStore = new HistoryStore(appDb);
+	const historyIndex = new HistoryIndex(appDb);
+	// Reuse the admin redaction policy to sanitize history text before embedding.
+	const historyRedactor = createRedactionPipelineFromPolicy(
+		policy.get() as unknown as {
+			redaction?: import("./redaction-pipeline.js").RedactionPolicy;
+		},
+	);
+	historyStore.attachIndex(historyIndex, historyRedactor);
+	const bookmarksStore = new BookmarksStore(appDb);
+	const profileStore = new ProfileStore(appDb);
+	const unregisterHistory = registerHistoryIpc(historyStore);
+	const unregisterBookmarks = registerBookmarksIpc(bookmarksStore);
+
+	let activeSlug: string | undefined = personaManager.list()[0]?.slug;
+	// Lazily populated below once orchestrator is built; the hook reads through
+	// this indirection so the current host can be found at nav time.
+	const hostRef: { get: () => AgentHost | undefined } = {
+		get: () => undefined,
+	};
+
+	const tm = new TabManager({
+		window: win,
+		defaultProfileId: "default",
+		resolveProfilePartition: (profileId) =>
+			profileStore.getById(profileId)?.partition,
+		onIncognitoPartitionEmpty: (partition) => {
+			// Purge in-memory storage when the last incognito tab of a session closes.
+			void session
+				.fromPartition(partition)
+				.clearStorageData()
+				.catch((err) =>
+					console.warn("[incognito] clearStorageData failed:", err),
+				);
+		},
+		navigationHook: {
+			onNavigate: (_tabId, url, title, ctx) => {
+				// Incognito tabs never touch the persistent history / embedding index
+				// — that would defeat the point. Persona auto-switch still fires since
+				// it's purely in-memory and session-scoped.
+				if (!ctx.isIncognito) {
+					try {
+						historyStore.recordWithIndex(url, title);
+					} catch (err) {
+						console.warn("[history] record failed:", err);
+					}
+				}
+				try {
+					const match = personaManager.matchByDomain(url);
+					if (match) {
+						if (activeSlug !== match.slug) activeSlug = match.slug;
+						hostRef.get()?.switchPersona(match);
+					}
+				} catch (err) {
+					console.warn("[persona-auto-switch] failed:", err);
+				}
+			},
+		},
+	});
 	const unregisterTab = registerTabIpc(tm);
+	const unregisterReading = registerReadingIpc(tm);
+
+	// Extensions (Stage 15). Loaded into the default session so installed
+	// Chrome MV3 extensions see the main persistent profile. Incognito partitions
+	// deliberately skip extension loading.
+	const extSession = session.defaultSession as unknown as ExtensionSessionLike;
+	const extensionHost = new ExtensionHost({
+		storePath: path.join(userDataDir, "agent-browser", "extensions.json"),
+		session: extSession,
+		getPolicy: () => policy.get().extension,
+	});
+	void extensionHost.loadEnabledAll().then((r) => {
+		if (r.failed.length > 0 || r.blockedByPolicy.length > 0) {
+			console.warn(
+				"[extensions] boot load report:",
+				JSON.stringify(r, null, 2),
+			);
+		}
+	});
+	const unregisterExtensions = registerExtensionsIpc({
+		host: extensionHost,
+		pickFolder: async () => {
+			const r = await dialog.showOpenDialog(win, {
+				properties: ["openDirectory"],
+				title: "Load unpacked extension folder",
+			});
+			if (r.canceled || r.filePaths.length === 0) return null;
+			return r.filePaths[0] ?? null;
+		},
+	});
+
+	// E2E sync (Stage 16). Passphrase-derived key lives only in engine memory.
+	const syncConfigStore = new SyncConfigStore(
+		path.join(userDataDir, "agent-browser", "sync-config.json"),
+	);
+	const syncCfgSnapshot = syncConfigStore.load();
+	const syncTransport = syncCfgSnapshot.serverUrl
+		? new HttpSyncTransport({
+				baseUrl: syncCfgSnapshot.serverUrl,
+				// Reuse an existing persona auth token if stored under this vault key.
+				getAuthToken: () => null,
+			})
+		: new NoopSyncTransport();
+	const syncEngine = new SyncEngine({
+		configStore: syncConfigStore,
+		bookmarks: bookmarksStore,
+		history: historyStore,
+		appDb,
+		transport: syncTransport,
+	});
+	const unregisterSync = registerSyncIpc(syncEngine);
+
+	const unregisterProfiles = registerProfilesIpc(profileStore, {
+		onProfileRemoved: (partition) => {
+			// Close any tabs still using the removed partition, then purge the session.
+			for (const t of tm.list()) {
+				if (t.partition === partition) tm.close(t.id);
+			}
+			void session
+				.fromPartition(partition)
+				.clearStorageData()
+				.catch((err) =>
+					console.warn("[profiles] clearStorageData failed:", err),
+				);
+		},
+	});
 	tm.create("https://example.com");
 	win.on("resize", () => tm.handleResize());
 
-	let activeSlug: string | undefined = personaManager.list()[0]?.slug;
+	// Downloads (Stage 1.6).
+	const downloadsMgr = new DownloadManager({
+		session: session.defaultSession,
+		dialog: {
+			showSaveDialog: (opts) => dialog.showSaveDialog(win, opts),
+		},
+		defaultDir: app.getPath("downloads"),
+		broadcast: (rec) => {
+			if (!win.isDestroyed()) win.webContents.send("downloads:progress", rec);
+		},
+		openFolder: (p) => {
+			void shell.openPath(p);
+		},
+	});
+	const unregisterDownloads = registerDownloadsIpc(downloadsMgr);
 	const orchestrator = createOrchestrator({
 		tabManager: tm,
 		policy,
@@ -279,9 +484,25 @@ async function createMainWindow(
 		toolResultStorage: infra.toolResultStorage,
 		confirmation: infra.confirmation,
 		taskStore: infra.taskStore,
+		vault: infra.vault,
 	});
+	hostRef.get = () => orchestrator.getHost();
+
 	const unregisterAgent = registerAgentIpc(orchestrator, () => win.webContents);
 	const unregisterSlash = registerSlashIpc(infra, tm, orchestrator);
+	const unregisterVault = registerVaultIpc(infra.vault);
+	const unregisterTrace = registerTraceIpc(infra.auditLog);
+	const routinesEngine = new RoutinesEngine({
+		dir: path.join(userDataDir, "agent-browser", "routines"),
+		orchestrator: {
+			// Route scheduled routines through the background task channel so
+			// a cron tick never interrupts the user's live sidebar session.
+			startTask: (prompt, target) =>
+				orchestrator.startBackgroundTask(prompt, target),
+		},
+	});
+	void routinesEngine.load().then(() => routinesEngine.start());
+	const unregisterRoutines = registerRoutinesIpc(routinesEngine);
 	const unregisterPersona = registerPersonaIpc({
 		personaManager,
 		getActiveSlug: () => activeSlug,
@@ -325,6 +546,18 @@ async function createMainWindow(
 		unregisterAgent();
 		unregisterPersona();
 		unregisterSlash();
+		unregisterVault();
+		unregisterTrace();
+		unregisterRoutines();
+		routinesEngine.stop();
+		unregisterHistory();
+		unregisterBookmarks();
+		unregisterDownloads();
+		unregisterProfiles();
+		unregisterReading();
+		unregisterExtensions();
+		unregisterSync();
+		syncEngine.lock();
 		ipcMain.removeHandler("tab:snapshotCurrent");
 		tm.destroy();
 	});
@@ -352,6 +585,7 @@ function registerSlashIpc(
 				taskStore: infra.taskStore,
 				auditLog: auditLogAdapter,
 				currentTaskId: orchestrator.getHost() ? "current" : undefined,
+				vault: infra.vault,
 				// tools: not wired here — slash /screenshot /dom-tree use tool invocations
 				// which require an active AgentHost; Stage 3 integration left as TODO.
 			},
@@ -370,6 +604,16 @@ app.whenReady().then(async () => {
 	const personaManager = await initPersonaManager();
 	const infra = createWindowInfra(policy);
 	globalTaskStore = infra.taskStore;
+	// Persona sync (Stage 4.5) — best effort; falls back to local cache.
+	try {
+		const userDataDir = app.getPath("userData");
+		const appDb = getAppDatabase(
+			path.join(userDataDir, "agent-browser", "app.sqlite"),
+		);
+		await syncPersonasOnce({ appDb, personaManager });
+	} catch (err) {
+		console.warn("[persona-sync] failed:", err);
+	}
 	// Emergency stop — global shortcut aborts all running tasks in the window.
 	registerEmergencyStop({ store: infra.taskStore, globalShortcut });
 	await createMainWindow(policy, personaManager, infra);

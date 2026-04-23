@@ -1,12 +1,18 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { SettingsRouter } from "../settings/SettingsRouter";
 import { Sidebar } from "../sidebar/Sidebar";
-import type { TabSummary } from "../types/preload";
+import type { ProfileView, TabSummary } from "../types/preload";
+import { ReadingMode } from "./ReadingMode";
 
 const REFRESH_MS = 500;
 
 export function App() {
 	const [tabs, setTabs] = useState<TabSummary[]>([]);
 	const [urlInput, setUrlInput] = useState("");
+	const [settingsOpen, setSettingsOpen] = useState(false);
+	const [profiles, setProfiles] = useState<ProfileView[]>([]);
+	const [newTabMenuOpen, setNewTabMenuOpen] = useState(false);
+	const [readingTabId, setReadingTabId] = useState<string | null>(null);
 
 	const refresh = useCallback(async () => {
 		const bridge = window.agentBrowser;
@@ -29,6 +35,16 @@ export function App() {
 		return () => clearInterval(timer);
 	}, [refresh]);
 
+	// biome-ignore lint/correctness/useExhaustiveDependencies: settingsOpen is the edge trigger — reload profiles so newly-created ones show up in the tabstrip without a full refresh.
+	useEffect(() => {
+		const bridge = window.agentBrowser?.profiles;
+		if (!bridge) return;
+		void bridge
+			.list()
+			.then(setProfiles)
+			.catch(() => setProfiles([]));
+	}, [settingsOpen]);
+
 	const active = tabs.find((t) => t.active);
 
 	const onNavigate = (e: FormEvent<HTMLFormElement>) => {
@@ -39,6 +55,16 @@ export function App() {
 
 	const onNewTab = () => {
 		void window.agentBrowser?.tab.open("about:blank");
+	};
+
+	const onNewIncognito = () => {
+		setNewTabMenuOpen(false);
+		void window.agentBrowser?.tab.open("about:blank", { incognito: true });
+	};
+
+	const onNewInProfile = (profileId: string) => {
+		setNewTabMenuOpen(false);
+		void window.agentBrowser?.tab.open("about:blank", { profileId });
 	};
 
 	const onFocus = (id: string) => {
@@ -66,9 +92,22 @@ export function App() {
 				{tabs.map((t) => (
 					<div
 						key={t.id}
-						className={`tab ${t.active ? "active" : ""}`}
-						title={t.url}
+						className={`tab ${t.active ? "active" : ""}${
+							t.isIncognito ? " incognito" : ""
+						}`}
+						title={`${t.url}${t.isIncognito ? " (incognito)" : ""}`}
 					>
+						{t.isIncognito && (
+							<span className="tab-badge" role="img" aria-label="Incognito">
+								🕶
+							</span>
+						)}
+						{!t.isIncognito && t.profileId && t.profileId !== "default" && (
+							<span className="tab-badge" role="img" aria-label="Profile">
+								{profiles.find((p) => p.id === t.profileId)?.name.slice(0, 1) ??
+									"·"}
+							</span>
+						)}
 						<button
 							type="button"
 							className="tab-title"
@@ -86,9 +125,44 @@ export function App() {
 						</button>
 					</div>
 				))}
-				<button type="button" className="tab-new" onClick={onNewTab}>
-					+
-				</button>
+				<div className="tab-new-wrapper">
+					<button type="button" className="tab-new" onClick={onNewTab}>
+						+
+					</button>
+					<button
+						type="button"
+						className="tab-new-menu"
+						onClick={() => setNewTabMenuOpen((v) => !v)}
+						aria-label="New tab options"
+						title="New tab options"
+					>
+						▾
+					</button>
+					{newTabMenuOpen && (
+						<div className="tab-new-popover" role="menu">
+							<button type="button" role="menuitem" onClick={onNewIncognito}>
+								🕶 New incognito tab
+							</button>
+							{profiles
+								.filter((p) => p.id !== "default")
+								.map((p) => (
+									<button
+										key={p.id}
+										type="button"
+										role="menuitem"
+										onClick={() => onNewInProfile(p.id)}
+									>
+										👤 Open in profile: {p.name}
+									</button>
+								))}
+							{profiles.length <= 1 && (
+								<div className="tab-new-popover-hint">
+									Create additional profiles in Settings → Profiles.
+								</div>
+							)}
+						</div>
+					)}
+				</div>
 			</header>
 			<form className="addressbar" onSubmit={onNavigate}>
 				<button type="button" onClick={onBack}>
@@ -105,6 +179,23 @@ export function App() {
 					onChange={(e) => setUrlInput(e.target.value)}
 					placeholder="URL or search"
 				/>
+				<button
+					type="button"
+					onClick={() => active && setReadingTabId(active.id)}
+					disabled={!active}
+					aria-label="Reading mode"
+					title="Reading mode"
+				>
+					📖
+				</button>
+				<button
+					type="button"
+					onClick={() => setSettingsOpen(true)}
+					aria-label="Open settings"
+					title="Settings"
+				>
+					⚙
+				</button>
 			</form>
 			<main className="content">
 				<section className="webview-slot">
@@ -114,6 +205,17 @@ export function App() {
 				</section>
 				<Sidebar />
 			</main>
+			{settingsOpen && (
+				<div className="settings-overlay" role="dialog" aria-modal="true">
+					<SettingsRouter onClose={() => setSettingsOpen(false)} />
+				</div>
+			)}
+			{readingTabId && (
+				<ReadingMode
+					tabId={readingTabId}
+					onClose={() => setReadingTabId(null)}
+				/>
+			)}
 		</div>
 	);
 }

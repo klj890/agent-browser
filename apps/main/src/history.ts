@@ -1,0 +1,266 @@
+/**
+ * Browsing history store. Backed by the shared SQLite DB (Stage 1.5).
+ *
+ * Stage 11: optional semantic index. When a HistoryIndex + RedactionPipeline
+ * are attached, `recordWithIndex()` writes the row synchronously and fires a
+ * background task to embed `title + " " + url` (after redaction) and store
+ * the vector in `history_embeddings`. Embedding failures never block the
+ * history write — they are logged and swallowed.
+ */
+import type { HistoryIndex, SemanticHit } from "./history-index.js";
+import type { SensitiveWordFilter } from "./redaction-pipeline.js";
+import type { AppDatabase } from "./storage/sqlite.js";
+
+export interface HistoryEntry {
+	id: number;
+	url: string;
+	title: string;
+	visited_at: number;
+}
+
+/**
+ * Escape a single token for inclusion in an FTS5 MATCH expression.
+ * Any double-quote becomes two double-quotes (FTS5 string-literal quoting);
+ * the whole token is then wrapped in double-quotes and given a `*` suffix
+ * so partial words still match.
+ */
+function escapeFtsToken(tok: string): string {
+	// Drop characters FTS5 treats as operators (colon → column spec, paren →
+	// subexpression). Trimming them is fine for a search UI.
+	const cleaned = tok.replace(/[():]/g, "");
+	if (!cleaned) return "";
+	return `"${cleaned.replace(/"/g, '""')}"*`;
+}
+
+export function toFtsMatch(q: string): string {
+	const parts = q
+		.split(/\s+/)
+		.map((s) => s.trim())
+		.filter(Boolean)
+		.map(escapeFtsToken)
+		.filter(Boolean);
+	if (parts.length === 0) return "";
+	return parts.join(" ");
+}
+
+export class HistoryStore {
+	private readonly insertStmt: import("better-sqlite3").Statement<
+		[string, string, number]
+	>;
+	private readonly listStmt: import("better-sqlite3").Statement<
+		[number, number]
+	>;
+	private readonly searchStmt: import("better-sqlite3").Statement<
+		[string, string, number]
+	>;
+	private readonly ftsStmt: import("better-sqlite3").Statement<
+		[string, number]
+	>;
+	private readonly listSinceStmt: import("better-sqlite3").Statement<
+		[number, number, number, number]
+	>;
+	private readonly existingIdStmt: import("better-sqlite3").Statement<
+		[string, number]
+	>;
+	private readonly clearStmt: import("better-sqlite3").Statement;
+	private readonly getByIdsStmt: import("better-sqlite3").Statement;
+	private index: HistoryIndex | null = null;
+	private redactor: SensitiveWordFilter | null = null;
+
+	constructor(private readonly appDb: AppDatabase) {
+		const db = appDb.db;
+		// INSERT OR IGNORE so repeated records of the same (url, visited_at)
+		// — e.g. a sync retry applying the same remote rows twice — are
+		// quietly deduped by the UNIQUE INDEX from migration 005.
+		this.insertStmt = db.prepare(
+			"INSERT OR IGNORE INTO history (url, title, visited_at) VALUES (?, ?, ?)",
+		);
+		// Compound cursor on (visited_at, id) so rows sharing a visited_at
+		// that straddle a page boundary aren't dropped by the next page.
+		this.listSinceStmt = db.prepare(
+			`SELECT id, url, title, visited_at FROM history
+			 WHERE visited_at > ?
+			    OR (visited_at = ? AND id > ?)
+			 ORDER BY visited_at ASC, id ASC
+			 LIMIT ?`,
+		);
+		this.existingIdStmt = db.prepare(
+			"SELECT id FROM history WHERE url = ? AND visited_at = ?",
+		);
+		this.listStmt = db.prepare(
+			"SELECT id, url, title, visited_at FROM history ORDER BY visited_at DESC LIMIT ? OFFSET ?",
+		);
+		this.searchStmt = db.prepare(
+			"SELECT id, url, title, visited_at FROM history WHERE url LIKE ? OR title LIKE ? ORDER BY visited_at DESC LIMIT ?",
+		);
+		// FTS5 MATCH: ranked by bm25 (lower = more relevant). We join back to
+		// history by rowid to hydrate the real row.
+		this.ftsStmt = db.prepare(
+			`SELECT h.id, h.url, h.title, h.visited_at
+			 FROM history_fts f
+			 JOIN history h ON h.id = f.rowid
+			 WHERE history_fts MATCH ?
+			 ORDER BY bm25(history_fts), h.visited_at DESC
+			 LIMIT ?`,
+		);
+		this.clearStmt = db.prepare("DELETE FROM history");
+		this.getByIdsStmt = db.prepare(
+			// Used by semanticSearch() to hydrate HistoryEntry rows from a hit list.
+			// Parameters are bound dynamically via rest spread.
+			"SELECT id, url, title, visited_at FROM history WHERE id = ?",
+		);
+	}
+
+	/** Attach semantic index + redactor. Safe to call once at startup. */
+	attachIndex(index: HistoryIndex, redactor: SensitiveWordFilter): void {
+		this.index = index;
+		this.redactor = redactor;
+	}
+
+	record(url: string, title: string, visitedAt: number = Date.now()): number {
+		if (!url) return 0;
+		// Skip internal / non-http schemes
+		if (!/^https?:|^file:/.test(url)) return 0;
+		const info = this.insertStmt.run(url, title ?? "", visitedAt);
+		if (info.changes === 0) {
+			// UNIQUE(url, visited_at) collision — return the existing row id so
+			// callers that need a handle (e.g. recordWithIndex → HistoryIndex
+			// upsert) still work idempotently.
+			const row = this.existingIdStmt.get(url, visitedAt) as
+				| { id: number }
+				| undefined;
+			return row?.id ?? 0;
+		}
+		return Number(info.lastInsertRowid);
+	}
+
+	/**
+	 * Record a visit and (if an index is attached) asynchronously embed the
+	 * redacted `title + " " + url` string. Returns the new row id; returns 0
+	 * when the URL was filtered out.
+	 *
+	 * Embedding work is serialized through a single-slot queue so a burst of
+	 * calls (e.g. SyncEngine.pullNow applying hundreds of remote rows at
+	 * once) cannot fork hundreds of concurrent transformers.js runs that
+	 * would spike CPU / memory.
+	 */
+	recordWithIndex(
+		url: string,
+		title: string,
+		visitedAt: number = Date.now(),
+	): number {
+		const id = this.record(url, title, visitedAt);
+		if (id === 0) return 0;
+		const idx = this.index;
+		if (!idx) return id;
+		const raw = `${title ?? ""} ${url}`.trim();
+		const text = this.redactor ? this.redactor.filter(raw) : raw;
+		this.enqueueEmbed(idx, id, text);
+		return id;
+	}
+
+	/** Serialize embedding work to at most one in-flight job per store. */
+	private embedTail: Promise<unknown> = Promise.resolve();
+	private enqueueEmbed(idx: HistoryIndex, id: number, text: string): void {
+		this.embedTail = this.embedTail
+			.catch(() => undefined)
+			.then(() =>
+				idx.upsert(id, text).catch((err) => {
+					console.warn("[history-index] upsert failed:", err);
+				}),
+			);
+	}
+
+	/**
+	 * Await any in-flight embed jobs kicked off by recordWithIndex. Useful
+	 * in tests that need to assert on the semantic index immediately after
+	 * a burst of records; production code can fire-and-forget.
+	 */
+	waitForEmbeddings(): Promise<unknown> {
+		return this.embedTail;
+	}
+
+	list(limit = 50, offset = 0): HistoryEntry[] {
+		return this.listStmt.all(limit, offset) as HistoryEntry[];
+	}
+
+	/**
+	 * Strict ascending pagination by (visited_at, id) — the id acts as a
+	 * tiebreaker so rows sharing the same visited_at can span pages safely.
+	 *
+	 * `afterVisitedAt = 0, afterId = 0` starts from the beginning. To fetch
+	 * the next page, pass the last returned row's `visited_at` and `id`.
+	 * Stop when the result is empty.
+	 */
+	listSince(
+		afterVisitedAt: number,
+		afterId: number,
+		limit: number,
+	): HistoryEntry[] {
+		return this.listSinceStmt.all(
+			afterVisitedAt,
+			afterVisitedAt,
+			afterId,
+			limit,
+		) as HistoryEntry[];
+	}
+
+	search(q: string, limit = 50): HistoryEntry[] {
+		const pat = `%${q.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
+		return this.searchStmt.all(pat, pat, limit) as HistoryEntry[];
+	}
+
+	/**
+	 * Full-text search backed by an FTS5 virtual table. The query is rewritten
+	 * into a safe MATCH expression: each whitespace-separated token becomes a
+	 * prefix match, letting the user type partial words. Special FTS operators
+	 * (AND/OR/NOT/NEAR/column specifiers/quotes) are escaped to avoid
+	 * accidental syntax errors on user input.
+	 */
+	fullTextSearch(q: string, limit = 50): HistoryEntry[] {
+		const match = toFtsMatch(q);
+		if (!match) return [];
+		try {
+			return this.ftsStmt.all(match, limit) as HistoryEntry[];
+		} catch {
+			// A malformed MATCH expression (e.g. user typed stray `"`) — treat
+			// as no results rather than crashing the IPC channel.
+			return [];
+		}
+	}
+
+	/**
+	 * Semantic search via the attached HistoryIndex. Falls back to empty
+	 * array if no index is attached. Returns entries ordered by similarity.
+	 *
+	 * Uses a single `WHERE id IN (...)` round-trip to hydrate rows instead
+	 * of issuing one SELECT per hit. Preserves the score ranking by
+	 * re-projecting the server rows back through the original hit order.
+	 */
+	async semanticSearch(q: string, limit = 20): Promise<HistoryEntry[]> {
+		if (!this.index) return [];
+		const hits: SemanticHit[] = await this.index.search(q, limit);
+		if (hits.length === 0) return [];
+		const ids = hits.map((h) => h.id);
+		const placeholders = ids.map(() => "?").join(",");
+		const rows = this.appDb.db
+			.prepare(
+				`SELECT id, url, title, visited_at FROM history WHERE id IN (${placeholders})`,
+			)
+			.all(...ids) as HistoryEntry[];
+		const byId = new Map<number, HistoryEntry>(rows.map((r) => [r.id, r]));
+		const out: HistoryEntry[] = [];
+		for (const id of ids) {
+			const row = byId.get(id);
+			if (row) out.push(row);
+		}
+		return out;
+	}
+
+	clear(): void {
+		this.clearStmt.run();
+		// CASCADE on history_embeddings handles vectors, but call deleteAll()
+		// defensively in case the FK isn't honored (tests in :memory: enable it).
+		if (this.index) this.index.deleteAll();
+	}
+}

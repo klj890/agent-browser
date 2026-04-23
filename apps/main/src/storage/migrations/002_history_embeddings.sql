@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS history_embeddings (
+  history_id INTEGER PRIMARY KEY REFERENCES history(id) ON DELETE CASCADE,
+  dim INTEGER NOT NULL,
+  vec BLOB NOT NULL
+);

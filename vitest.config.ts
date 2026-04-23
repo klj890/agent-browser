@@ -10,6 +10,7 @@ export default defineConfig({
 			"**/node_modules/**",
 			"**/dist/**",
 			"**/out/**",
+			".claude/**",
 			"scripts/**",
 			"e2e/**",
 		],

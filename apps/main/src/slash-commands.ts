@@ -24,6 +24,8 @@ export type SlashResult =
 export interface SlashCommandCtx {
 	taskStore?: TaskStateStore;
 	currentTaskId?: string;
+	/** Auth Vault (P1 Stage 9). If present, /clear-vault calls vault.clear(). */
+	vault?: { clear: () => Promise<void> };
 	/** Minimal shape — a concrete shape lives in agent-host (Stage 3). */
 	tools?: {
 		screenshot?: (input: {
@@ -155,16 +157,24 @@ const exportTraceCommand: SlashCommand = {
 
 const clearVaultCommand: SlashCommand = {
 	name: "clear-vault",
-	description: "Clear the credential vault (not yet implemented).",
-	async execute() {
-		// Auth Vault lands in P1-9. Until then, we surface an explicit placeholder
-		// rather than silently succeeding. The real implementation will require
-		// a confirmation step.
-		return {
-			kind: "text",
-			content:
-				"vault not implemented yet (P1-9); will require confirmation once landed.",
-		};
+	description: "Clear the credential vault.",
+	async execute(ctx) {
+		if (!ctx.vault) {
+			return {
+				kind: "text",
+				content:
+					"vault not implemented yet (P1-9); will require confirmation once landed.",
+			};
+		}
+		try {
+			await ctx.vault.clear();
+			return { kind: "text", content: "vault cleared." };
+		} catch (err) {
+			return {
+				kind: "text",
+				content: `clear-vault failed: ${(err as Error).message}`,
+			};
+		}
 	},
 };
 

@@ -26,6 +26,8 @@ import {
 	existsSync,
 	mkdirSync,
 	readdirSync,
+	readFileSync,
+	unlinkSync,
 	type WriteStream,
 } from "node:fs";
 import path from "node:path";
@@ -349,6 +351,109 @@ export class AuditLog {
 			? path.join(this.dir, `${this.currentDate}.jsonl`)
 			: null;
 	}
+
+	#readAllEvents(): AuditEvent[] {
+		if (!existsSync(this.dir)) return [];
+		const files = readdirSync(this.dir)
+			.filter((n) => /^(\d{4}-\d{2}-\d{2})\.jsonl$/.test(n))
+			.sort();
+		const events: AuditEvent[] = [];
+		for (const name of files) {
+			const full = path.join(this.dir, name);
+			let content: string;
+			try {
+				content = readFileSync(full, "utf8");
+			} catch {
+				continue;
+			}
+			for (const line of content.split("\n")) {
+				if (!line) continue;
+				try {
+					events.push(JSON.parse(line) as AuditEvent);
+				} catch {
+					// skip malformed line
+				}
+			}
+		}
+		return events;
+	}
+
+	list(opts: ListOptions = {}): AuditEvent[] {
+		const { taskId, since, limit = 500, offset = 0 } = opts;
+		let events = this.#readAllEvents();
+		if (taskId !== undefined) {
+			events = events.filter((e) => "task_id" in e && e.task_id === taskId);
+		}
+		if (since !== undefined) {
+			events = events.filter((e) => e.ts >= since);
+		}
+		events.reverse();
+		return events.slice(offset, offset + limit);
+	}
+
+	listTasks(limit = 50): TaskTraceSummary[] {
+		const events = this.#readAllEvents();
+		const byId = new Map<string, TaskTraceSummary>();
+		for (const e of events) {
+			if (e.event === "task.start") {
+				byId.set(e.task_id, {
+					task_id: e.task_id,
+					started_at: e.ts,
+					persona: e.persona,
+					status: "running",
+				});
+			} else if (e.event === "task.end") {
+				const existing = byId.get(e.task_id);
+				if (existing) {
+					existing.ended_at = e.ts;
+					existing.status = e.status;
+				} else {
+					byId.set(e.task_id, {
+						task_id: e.task_id,
+						started_at: e.ts,
+						ended_at: e.ts,
+						persona: "",
+						status: e.status,
+					});
+				}
+			}
+		}
+		const out = [...byId.values()].sort((a, b) => b.started_at - a.started_at);
+		return out.slice(0, limit);
+	}
+
+	async clear(): Promise<void> {
+		if (this.stream) {
+			const old = this.stream;
+			this.stream = null;
+			await new Promise<void>((resolve) => old.end(() => resolve()));
+		}
+		this.currentDate = null;
+		if (!existsSync(this.dir)) return;
+		for (const name of readdirSync(this.dir)) {
+			if (!/^(\d{4}-\d{2}-\d{2})\.jsonl$/.test(name)) continue;
+			try {
+				unlinkSync(path.join(this.dir, name));
+			} catch {
+				// ignore
+			}
+		}
+	}
+}
+
+export interface ListOptions {
+	taskId?: string;
+	limit?: number;
+	offset?: number;
+	since?: number;
+}
+
+export interface TaskTraceSummary {
+	task_id: string;
+	started_at: number;
+	ended_at?: number;
+	status: "running" | "completed" | "failed" | "killed" | "budget_exceeded";
+	persona: string;
 }
 
 // ---------------------------------------------------------------------------
