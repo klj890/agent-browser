@@ -1,21 +1,18 @@
 /**
- * Audit Log (Stage 6.4)
+ * Audit Log (Stage 6.4 + query-index hardening)
  *
- * JSONL-formatted audit log that records every gate/hook event in the agent
- * step loop. See PLAN.md 附录 I for the authoritative event schema and 附录 L
- * for the exact hook points. This module is intentionally independent of
- * AgentHost — Stage 3 will wire hooks in via `installAuditHooks`.
+ * Writes every gate/hook event in the agent step loop to two destinations:
  *
- * Design:
- *   - One file per UTC day at `{dir}/YYYY-MM-DD.jsonl`.
- *   - Append-only; each event is a single line of JSON with a trailing `\n`.
- *   - Rotation is driven lazily on each `append()` (cheap UTC date check).
- *   - Concurrent appends are serialized via an internal promise chain so lines
- *     are never interleaved and order matches call order.
- *   - `close()` flushes and closes the active write stream; further `append`
- *     calls throw.
- *   - `archiveOlderThan(days)` is currently a stub (no zstd dep); it enumerates
- *     candidate files and leaves a TODO for Stage 6.4 hardening.
+ *   1. jsonl — one append-only file per UTC day at `{dir}/YYYY-MM-DD.jsonl`.
+ *      Cheap to read with `grep/jq`, trivial to archive/compress, immutable.
+ *   2. SQLite — `{dir}/events.sqlite` indexed for `list()` / `listTasks()`.
+ *      Queries O(log N) instead of O(total events), doesn't pin the process
+ *      on `readFileSync` during Trace viewer loads.
+ *
+ * Why dual-write: the jsonl form is great for backup / postmortem / external
+ * scripts; the SQLite form is great for interactive queries. Either can be
+ * rebuilt from the other — backfill from jsonl runs automatically on first
+ * boot when the SQLite index is empty.
  *
  * NEVER write raw prompt/tool-result payloads into audit log. Use
  * `summarizeInput` / `summarizeOutput` which truncate + hash.
@@ -31,6 +28,7 @@ import {
 	type WriteStream,
 } from "node:fs";
 import path from "node:path";
+import Database, { type Database as BetterSqliteDb } from "better-sqlite3";
 
 // ---------------------------------------------------------------------------
 // Event schema (discriminated union) — PLAN.md 附录 I
@@ -211,6 +209,12 @@ export interface AuditLogOptions {
 	dir?: string;
 	/** Clock override for testability. Defaults to `Date.now`. */
 	now?: () => number;
+	/**
+	 * Path to the SQLite file used as the query index. Defaults to
+	 * `{dir}/events.sqlite`. Tests can pass `:memory:` for a pure in-memory
+	 * index that never touches disk.
+	 */
+	dbPath?: string;
 }
 
 /** Format a ms-epoch timestamp as `YYYY-MM-DD` in UTC. */
@@ -243,6 +247,143 @@ function resolveDefaultDir(): string {
 	);
 }
 
+/**
+ * SQLite-backed query index for audit events. Shape kept internal to this
+ * module so the outer AuditLog surface stays unchanged.
+ */
+class AuditIndex {
+	private readonly db: BetterSqliteDb;
+	private readonly insertEvent: import("better-sqlite3").Statement<
+		[number, string, string | null, string]
+	>;
+	private readonly upsertTaskStart: import("better-sqlite3").Statement;
+	private readonly updateTaskEnd: import("better-sqlite3").Statement;
+
+	constructor(dbPath: string) {
+		this.db = new Database(dbPath);
+		this.db.pragma("journal_mode = WAL");
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS events (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				ts INTEGER NOT NULL,
+				event TEXT NOT NULL,
+				task_id TEXT,
+				payload TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
+			CREATE INDEX IF NOT EXISTS events_task ON events(task_id, ts);
+			CREATE TABLE IF NOT EXISTS tasks (
+				task_id TEXT PRIMARY KEY,
+				started_at INTEGER NOT NULL,
+				ended_at INTEGER,
+				persona TEXT NOT NULL DEFAULT '',
+				status TEXT NOT NULL DEFAULT 'running'
+			);
+			CREATE INDEX IF NOT EXISTS tasks_started ON tasks(started_at DESC);
+		`);
+		this.insertEvent = this.db.prepare(
+			"INSERT INTO events (ts, event, task_id, payload) VALUES (?, ?, ?, ?)",
+		);
+		this.upsertTaskStart = this.db.prepare(
+			`INSERT INTO tasks (task_id, started_at, persona, status)
+			 VALUES (?, ?, ?, 'running')
+			 ON CONFLICT(task_id) DO UPDATE SET
+			   started_at = excluded.started_at,
+			   persona = excluded.persona`,
+		);
+		this.updateTaskEnd = this.db.prepare(
+			`INSERT INTO tasks (task_id, started_at, ended_at, status)
+			 VALUES (?, ?, ?, ?)
+			 ON CONFLICT(task_id) DO UPDATE SET
+			   ended_at = excluded.ended_at,
+			   status = excluded.status`,
+		);
+	}
+
+	recordEvent(event: AuditEvent): void {
+		const taskId =
+			"task_id" in event && typeof event.task_id === "string"
+				? event.task_id
+				: null;
+		this.insertEvent.run(event.ts, event.event, taskId, JSON.stringify(event));
+		if (event.event === "task.start") {
+			this.upsertTaskStart.run(event.task_id, event.ts, event.persona);
+		} else if (event.event === "task.end") {
+			this.updateTaskEnd.run(event.task_id, event.ts, event.ts, event.status);
+		}
+	}
+
+	count(): number {
+		const r = this.db.prepare("SELECT COUNT(*) AS n FROM events").get() as {
+			n: number;
+		};
+		return r.n;
+	}
+
+	list(opts: {
+		taskId?: string;
+		since?: number;
+		limit: number;
+		offset: number;
+	}): AuditEvent[] {
+		const clauses: string[] = [];
+		const params: (string | number)[] = [];
+		if (opts.taskId !== undefined) {
+			clauses.push("task_id = ?");
+			params.push(opts.taskId);
+		}
+		if (opts.since !== undefined) {
+			clauses.push("ts >= ?");
+			params.push(opts.since);
+		}
+		const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+		const rows = this.db
+			.prepare(
+				`SELECT payload FROM events ${where} ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?`,
+			)
+			.all(...params, opts.limit, opts.offset) as Array<{ payload: string }>;
+		return rows
+			.map((r) => {
+				try {
+					return JSON.parse(r.payload) as AuditEvent;
+				} catch {
+					return null;
+				}
+			})
+			.filter((e): e is AuditEvent => e !== null);
+	}
+
+	listTasks(limit: number): TaskTraceSummary[] {
+		const rows = this.db
+			.prepare(
+				`SELECT task_id, started_at, ended_at, persona, status
+				 FROM tasks ORDER BY started_at DESC LIMIT ?`,
+			)
+			.all(limit) as Array<{
+			task_id: string;
+			started_at: number;
+			ended_at: number | null;
+			persona: string;
+			status: string;
+		}>;
+		return rows.map((r) => ({
+			task_id: r.task_id,
+			started_at: r.started_at,
+			ended_at: r.ended_at ?? undefined,
+			persona: r.persona,
+			status: r.status as TaskTraceSummary["status"],
+		}));
+	}
+
+	clear(): void {
+		this.db.exec("DELETE FROM events; DELETE FROM tasks;");
+	}
+
+	close(): void {
+		this.db.close();
+	}
+}
+
 export class AuditLog {
 	private readonly dir: string;
 	private readonly now: () => number;
@@ -251,11 +392,42 @@ export class AuditLog {
 	private closed = false;
 	/** Mutex: sequential promise chain so `append()` order == call order. */
 	private writeChain: Promise<void> = Promise.resolve();
+	private readonly index: AuditIndex;
 
 	constructor(opts: AuditLogOptions = {}) {
 		this.dir = opts.dir ?? resolveDefaultDir();
 		this.now = opts.now ?? (() => Date.now());
 		if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true });
+		const dbPath = opts.dbPath ?? path.join(this.dir, "events.sqlite");
+		this.index = new AuditIndex(dbPath);
+		// First-boot migration: if the SQLite index is empty but jsonl files
+		// exist, replay the jsonl into the index so prior events stay queryable.
+		if (this.index.count() === 0) this.backfillFromJsonl();
+	}
+
+	private backfillFromJsonl(): void {
+		if (!existsSync(this.dir)) return;
+		const files = readdirSync(this.dir)
+			.filter((n) => /^(\d{4}-\d{2}-\d{2})\.jsonl$/.test(n))
+			.sort();
+		for (const name of files) {
+			const full = path.join(this.dir, name);
+			let content: string;
+			try {
+				content = readFileSync(full, "utf8");
+			} catch {
+				continue;
+			}
+			for (const line of content.split("\n")) {
+				if (!line) continue;
+				try {
+					const ev = JSON.parse(line) as AuditEvent;
+					this.index.recordEvent(ev);
+				} catch {
+					// skip malformed line
+				}
+			}
+		}
 	}
 
 	/** Append one event as a JSONL line. Rotates file lazily if UTC day changed. */
@@ -272,6 +444,14 @@ export class AuditLog {
 
 	async #doAppend(event: AuditEvent): Promise<void> {
 		if (this.closed) throw new Error("AuditLog: closed");
+		// Index first (synchronous, in-proc): if the jsonl write fails after
+		// this we still have a queryable record, and the jsonl can be
+		// reconstructed from SQLite if needed.
+		try {
+			this.index.recordEvent(event);
+		} catch (err) {
+			console.warn("[audit-log] index insert failed:", err);
+		}
 		const dateStamp = utcDateStamp(this.now());
 		if (dateStamp !== this.currentDate || !this.stream) {
 			await this.#openStreamForDate(dateStamp);
@@ -329,7 +509,7 @@ export class AuditLog {
 		return candidates;
 	}
 
-	/** Await any pending writes and close the active stream. */
+	/** Await any pending writes and close the active stream + index db. */
 	async close(): Promise<void> {
 		if (this.closed) return;
 		this.closed = true;
@@ -343,6 +523,11 @@ export class AuditLog {
 			this.stream = null;
 			await new Promise<void>((resolve) => s.end(() => resolve()));
 		}
+		try {
+			this.index.close();
+		} catch {
+			// idempotent close; db already gone is fine
+		}
 	}
 
 	/** Currently-open jsonl file path, or `null` if no writes yet. */
@@ -352,74 +537,13 @@ export class AuditLog {
 			: null;
 	}
 
-	#readAllEvents(): AuditEvent[] {
-		if (!existsSync(this.dir)) return [];
-		const files = readdirSync(this.dir)
-			.filter((n) => /^(\d{4}-\d{2}-\d{2})\.jsonl$/.test(n))
-			.sort();
-		const events: AuditEvent[] = [];
-		for (const name of files) {
-			const full = path.join(this.dir, name);
-			let content: string;
-			try {
-				content = readFileSync(full, "utf8");
-			} catch {
-				continue;
-			}
-			for (const line of content.split("\n")) {
-				if (!line) continue;
-				try {
-					events.push(JSON.parse(line) as AuditEvent);
-				} catch {
-					// skip malformed line
-				}
-			}
-		}
-		return events;
-	}
-
 	list(opts: ListOptions = {}): AuditEvent[] {
 		const { taskId, since, limit = 500, offset = 0 } = opts;
-		let events = this.#readAllEvents();
-		if (taskId !== undefined) {
-			events = events.filter((e) => "task_id" in e && e.task_id === taskId);
-		}
-		if (since !== undefined) {
-			events = events.filter((e) => e.ts >= since);
-		}
-		events.reverse();
-		return events.slice(offset, offset + limit);
+		return this.index.list({ taskId, since, limit, offset });
 	}
 
 	listTasks(limit = 50): TaskTraceSummary[] {
-		const events = this.#readAllEvents();
-		const byId = new Map<string, TaskTraceSummary>();
-		for (const e of events) {
-			if (e.event === "task.start") {
-				byId.set(e.task_id, {
-					task_id: e.task_id,
-					started_at: e.ts,
-					persona: e.persona,
-					status: "running",
-				});
-			} else if (e.event === "task.end") {
-				const existing = byId.get(e.task_id);
-				if (existing) {
-					existing.ended_at = e.ts;
-					existing.status = e.status;
-				} else {
-					byId.set(e.task_id, {
-						task_id: e.task_id,
-						started_at: e.ts,
-						ended_at: e.ts,
-						persona: "",
-						status: e.status,
-					});
-				}
-			}
-		}
-		const out = [...byId.values()].sort((a, b) => b.started_at - a.started_at);
-		return out.slice(0, limit);
+		return this.index.listTasks(limit);
 	}
 
 	async clear(): Promise<void> {
@@ -429,6 +553,7 @@ export class AuditLog {
 			await new Promise<void>((resolve) => old.end(() => resolve()));
 		}
 		this.currentDate = null;
+		this.index.clear();
 		if (!existsSync(this.dir)) return;
 		for (const name of readdirSync(this.dir)) {
 			if (!/^(\d{4}-\d{2}-\d{2})\.jsonl$/.test(name)) continue;
