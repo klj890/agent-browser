@@ -42,13 +42,19 @@ describe("HistoryIndex", () => {
 		// on insert when FK is ON — actually better-sqlite3 FK=ON enforces on
 		// insert too. So insert parent history rows first.
 		db.db
-			.prepare("INSERT INTO history (id, url, title, visited_at) VALUES (?, ?, ?, ?)")
+			.prepare(
+				"INSERT INTO history (id, url, title, visited_at) VALUES (?, ?, ?, ?)",
+			)
 			.run(1, "https://a/", "cat page", 1);
 		db.db
-			.prepare("INSERT INTO history (id, url, title, visited_at) VALUES (?, ?, ?, ?)")
+			.prepare(
+				"INSERT INTO history (id, url, title, visited_at) VALUES (?, ?, ?, ?)",
+			)
 			.run(2, "https://b/", "dog page", 2);
 		db.db
-			.prepare("INSERT INTO history (id, url, title, visited_at) VALUES (?, ?, ?, ?)")
+			.prepare(
+				"INSERT INTO history (id, url, title, visited_at) VALUES (?, ?, ?, ?)",
+			)
 			.run(3, "https://c/", "fish page", 3);
 
 		const idx = new HistoryIndex(db);
@@ -72,7 +78,9 @@ describe("HistoryIndex", () => {
 		const db = mkDb();
 		for (let i = 1; i <= 3; i++) {
 			db.db
-				.prepare("INSERT INTO history (id, url, title, visited_at) VALUES (?, ?, ?, ?)")
+				.prepare(
+					"INSERT INTO history (id, url, title, visited_at) VALUES (?, ?, ?, ?)",
+				)
 				.run(i, `https://${i}/`, "cat dog fish", i);
 		}
 		const idx = new HistoryIndex(db);
@@ -88,7 +96,9 @@ describe("HistoryIndex", () => {
 		setEmbedderForTests(async (t) => keywordEmbedder(t));
 		const db = mkDb();
 		db.db
-			.prepare("INSERT INTO history (id, url, title, visited_at) VALUES (?, ?, ?, ?)")
+			.prepare(
+				"INSERT INTO history (id, url, title, visited_at) VALUES (?, ?, ?, ?)",
+			)
 			.run(1, "https://a/", "x", 1);
 		const idx = new HistoryIndex(db);
 		await idx.upsert(1, "cat");
@@ -109,7 +119,9 @@ describe("HistoryIndex", () => {
 		const db = mkDb();
 		for (let i = 1; i <= 3; i++) {
 			db.db
-				.prepare("INSERT INTO history (id, url, title, visited_at) VALUES (?, ?, ?, ?)")
+				.prepare(
+					"INSERT INTO history (id, url, title, visited_at) VALUES (?, ?, ?, ?)",
+				)
 				.run(i, `https://${i}/`, "cat", i);
 		}
 		const idx = new HistoryIndex(db);

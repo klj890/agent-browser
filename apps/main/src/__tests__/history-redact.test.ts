@@ -40,10 +40,7 @@ describe("HistoryStore + RedactionPipeline", () => {
 		// JWT embedded in URL query — should be redacted before embedding.
 		const jwt =
 			"eyJabcdefghij.klmnopqrstuvwxyz0123456789.abcdefghij0123456789xyz";
-		store.recordWithIndex(
-			`https://example.com/?token=${jwt}`,
-			"Login page",
-		);
+		store.recordWithIndex(`https://example.com/?token=${jwt}`, "Login page");
 		await flush();
 
 		expect(seen).toHaveLength(1);

@@ -71,7 +71,9 @@ export async function embed(text: string): Promise<Float32Array> {
 
 function vecToBuffer(vec: Float32Array): Buffer {
 	// Copy so we never hand sqlite a view over shared memory.
-	return Buffer.from(vec.buffer.slice(vec.byteOffset, vec.byteOffset + vec.byteLength));
+	return Buffer.from(
+		vec.buffer.slice(vec.byteOffset, vec.byteOffset + vec.byteLength),
+	);
 }
 
 function bufferToVec(buf: Buffer, dim: number): Float32Array {

@@ -27,8 +27,8 @@ import {
 	mkdirSync,
 	readdirSync,
 	readFileSync,
-	type WriteStream,
 	unlinkSync,
+	type WriteStream,
 } from "node:fs";
 import path from "node:path";
 
