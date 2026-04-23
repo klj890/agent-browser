@@ -56,6 +56,12 @@ export class HistoryStore {
 	private readonly ftsStmt: import("better-sqlite3").Statement<
 		[string, number]
 	>;
+	private readonly listSinceStmt: import("better-sqlite3").Statement<
+		[number, number]
+	>;
+	private readonly existingIdStmt: import("better-sqlite3").Statement<
+		[string, number]
+	>;
 	private readonly clearStmt: import("better-sqlite3").Statement;
 	private readonly getByIdsStmt: import("better-sqlite3").Statement;
 	private index: HistoryIndex | null = null;
@@ -63,8 +69,17 @@ export class HistoryStore {
 
 	constructor(private readonly appDb: AppDatabase) {
 		const db = appDb.db;
+		// INSERT OR IGNORE so repeated records of the same (url, visited_at)
+		// — e.g. a sync retry applying the same remote rows twice — are
+		// quietly deduped by the UNIQUE INDEX from migration 005.
 		this.insertStmt = db.prepare(
-			"INSERT INTO history (url, title, visited_at) VALUES (?, ?, ?)",
+			"INSERT OR IGNORE INTO history (url, title, visited_at) VALUES (?, ?, ?)",
+		);
+		this.listSinceStmt = db.prepare(
+			"SELECT id, url, title, visited_at FROM history WHERE visited_at > ? ORDER BY visited_at ASC LIMIT ?",
+		);
+		this.existingIdStmt = db.prepare(
+			"SELECT id FROM history WHERE url = ? AND visited_at = ?",
 		);
 		this.listStmt = db.prepare(
 			"SELECT id, url, title, visited_at FROM history ORDER BY visited_at DESC LIMIT ? OFFSET ?",
@@ -101,6 +116,15 @@ export class HistoryStore {
 		// Skip internal / non-http schemes
 		if (!/^https?:|^file:/.test(url)) return 0;
 		const info = this.insertStmt.run(url, title ?? "", visitedAt);
+		if (info.changes === 0) {
+			// UNIQUE(url, visited_at) collision — return the existing row id so
+			// callers that need a handle (e.g. recordWithIndex → HistoryIndex
+			// upsert) still work idempotently.
+			const row = this.existingIdStmt.get(url, visitedAt) as
+				| { id: number }
+				| undefined;
+			return row?.id ?? 0;
+		}
 		return Number(info.lastInsertRowid);
 	}
 
@@ -129,6 +153,19 @@ export class HistoryStore {
 
 	list(limit = 50, offset = 0): HistoryEntry[] {
 		return this.listStmt.all(limit, offset) as HistoryEntry[];
+	}
+
+	/**
+	 * Ascending pagination by `visited_at`. Used by SyncEngine.pushNow to
+	 * iterate every unsynced row regardless of total history size, avoiding
+	 * the hard-coded `list(10_000, 0)` data-loss cliff.
+	 *
+	 * Pass `since=0` to start from the beginning; pass the last returned
+	 * row's `visited_at` to fetch the next page. Stop when the result
+	 * is empty.
+	 */
+	listSince(since: number, limit: number): HistoryEntry[] {
+		return this.listSinceStmt.all(since, limit) as HistoryEntry[];
 	}
 
 	search(q: string, limit = 50): HistoryEntry[] {

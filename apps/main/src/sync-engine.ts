@@ -156,8 +156,11 @@ export class SyncEngine {
 	async pushNow(): Promise<{ pushed: number }> {
 		const key = this.requireUnlocked();
 		const items: EncryptedItem[] = [];
+		// Bookmarks: filter by updated_at so edits (title / position / folder)
+		// also resync — BookmarksStore bumps updated_at on every upsert.
+		// Deletion is still not synced (needs tombstones); tracked for future.
 		for (const b of this.deps.bookmarks.list()) {
-			if (b.created_at <= this.cfg.lastPushedBookmarkAt) continue;
+			if (b.updated_at <= this.cfg.lastPushedBookmarkAt) continue;
 			items.push({
 				pointerId: itemPointer(key, `bookmark:${b.folder}:${b.url}`),
 				kind: "bookmark",
@@ -169,26 +172,37 @@ export class SyncEngine {
 						folder: b.folder,
 						position: b.position,
 						created_at: b.created_at,
+						updated_at: b.updated_at,
 					}),
 				),
-				updatedAt: b.created_at,
+				updatedAt: b.updated_at,
 			});
 		}
-		for (const h of this.deps.history.list(10_000, 0)) {
-			if (h.visited_at <= this.cfg.lastPushedHistoryAt) continue;
-			items.push({
-				pointerId: itemPointer(key, `history:${h.visited_at}:${h.url}`),
-				kind: "history",
-				envelope: encrypt(
-					key,
-					JSON.stringify({
-						url: h.url,
-						title: h.title,
-						visited_at: h.visited_at,
-					}),
-				),
-				updatedAt: h.visited_at,
-			});
+		// Paginate history by `visited_at` ascending so we catch every row
+		// past the watermark even when the user accumulated > any single-page
+		// worth of visits between syncs.
+		const HISTORY_PAGE = 1_000;
+		let historyCursor = this.cfg.lastPushedHistoryAt;
+		while (true) {
+			const batch = this.deps.history.listSince(historyCursor, HISTORY_PAGE);
+			if (batch.length === 0) break;
+			for (const h of batch) {
+				items.push({
+					pointerId: itemPointer(key, `history:${h.visited_at}:${h.url}`),
+					kind: "history",
+					envelope: encrypt(
+						key,
+						JSON.stringify({
+							url: h.url,
+							title: h.title,
+							visited_at: h.visited_at,
+						}),
+					),
+					updatedAt: h.visited_at,
+				});
+				if (h.visited_at > historyCursor) historyCursor = h.visited_at;
+			}
+			if (batch.length < HISTORY_PAGE) break;
 		}
 		if (items.length === 0) return { pushed: 0 };
 		await this.deps.transport.push(items);
@@ -267,7 +281,14 @@ export class SyncEngine {
 					title?: string;
 					visited_at: number;
 				};
-				this.deps.history.record(row.url, row.title ?? "", row.visited_at);
+				// Route through recordWithIndex so pulled rows enter the local
+				// semantic embedding index too — otherwise they're invisible to
+				// Stage 11 / history:semanticSearch on this device.
+				this.deps.history.recordWithIndex(
+					row.url,
+					row.title ?? "",
+					row.visited_at,
+				);
 				applied++;
 			} catch {
 				skipped++;

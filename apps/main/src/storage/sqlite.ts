@@ -186,4 +186,22 @@ CREATE TRIGGER IF NOT EXISTS history_au AFTER UPDATE ON history BEGIN
 END;
 `,
 	},
+	{
+		name: "005_history_unique.sql",
+		sql: `
+DELETE FROM history
+WHERE id NOT IN (
+  SELECT MIN(id) FROM history GROUP BY url, visited_at
+);
+CREATE UNIQUE INDEX IF NOT EXISTS history_url_visited_uniq
+  ON history(url, visited_at);
+`,
+	},
+	{
+		name: "006_bookmarks_updated_at.sql",
+		sql: `
+ALTER TABLE bookmarks ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+UPDATE bookmarks SET updated_at = created_at WHERE updated_at = 0;
+`,
+	},
 ];

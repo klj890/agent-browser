@@ -62,4 +62,26 @@ describe("HistoryStore", () => {
 		expect(h.list(2, 4).length).toBe(1);
 		db.close();
 	});
+
+	it("(url, visited_at) UNIQUE — second record returns the same id", () => {
+		const db = mkDb();
+		const h = new HistoryStore(db);
+		const first = h.record("https://a/", "A", 42);
+		const again = h.record("https://a/", "A", 42);
+		expect(first).toBeGreaterThan(0);
+		expect(again).toBe(first);
+		expect(h.list()).toHaveLength(1);
+		db.close();
+	});
+
+	it("listSince paginates ascending by visited_at", () => {
+		const db = mkDb();
+		const h = new HistoryStore(db);
+		for (let i = 1; i <= 5; i++) h.record(`https://x${i}.com/`, `x${i}`, i);
+		expect(h.listSince(0, 2).map((e) => e.visited_at)).toEqual([1, 2]);
+		expect(h.listSince(2, 2).map((e) => e.visited_at)).toEqual([3, 4]);
+		expect(h.listSince(4, 2).map((e) => e.visited_at)).toEqual([5]);
+		expect(h.listSince(5, 2)).toEqual([]);
+		db.close();
+	});
 });
