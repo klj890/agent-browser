@@ -201,6 +201,10 @@ export class AuthVault {
 		} catch {
 			// best effort
 		}
+		// Zero the master key buffer before dropping the reference — matches
+		// the hygiene pattern in SyncEngine.lock() so the derived 32B key
+		// cannot linger in freed heap pages.
+		if (this.masterKey) this.masterKey.fill(0);
 		this.masterKey = undefined;
 		// Force re-init on next access.
 		this.loading = undefined;
