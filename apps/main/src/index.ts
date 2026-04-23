@@ -352,13 +352,55 @@ async function createMainWindow(
 		get: () => undefined,
 	};
 
+	// Downloads (Stage 1.6 + P1-12 multi-session). Constructed BEFORE
+	// TabManager so onPartitionSeen can attach per-session will-download
+	// listeners as new profile / incognito partitions come online.
+	const downloadsMgr = new DownloadManager({
+		dialog: {
+			showSaveDialog: (opts) => dialog.showSaveDialog(win, opts),
+		},
+		defaultDir: app.getPath("downloads"),
+		broadcast: (rec) => {
+			if (!win.isDestroyed()) win.webContents.send("downloads:progress", rec);
+		},
+		openFolder: (p) => {
+			void shell.openPath(p);
+		},
+	});
+	// Attach the default session explicitly — the first tab that uses
+	// persist:default will trigger onPartitionSeen too, but we want the
+	// listener live even before the first tab exists (e.g. downloads kicked
+	// off from about:blank or service workers).
+	downloadsMgr.attachSession(
+		session.defaultSession as unknown as import("./download.js").SessionLike,
+		{ partition: "persist:default" },
+	);
+	const unregisterDownloads = registerDownloadsIpc(downloadsMgr);
+
 	const tm = new TabManager({
 		window: win,
 		defaultProfileId: "default",
 		resolveProfilePartition: (profileId) =>
 			profileStore.getById(profileId)?.partition,
+		onPartitionSeen: (partition, ctx) => {
+			// Wire every new partition (persistent profile or incognito) to
+			// the DownloadManager so downloads originating in non-default
+			// profiles / incognito tabs are captured, not dispatched to
+			// Electron's default writer.
+			const sess = session.fromPartition(
+				partition,
+			) as unknown as import("./download.js").SessionLike;
+			downloadsMgr.attachSession(sess, {
+				partition,
+				profileId: ctx.profileId,
+				isIncognito: ctx.isIncognito,
+			});
+		},
 		onIncognitoPartitionEmpty: (partition) => {
 			// Purge in-memory storage when the last incognito tab of a session closes.
+			// Detach the will-download handler and drop any in-memory records
+			// tied to this partition — no incognito download should survive.
+			downloadsMgr.dropPartition(partition);
 			void session
 				.fromPartition(partition)
 				.clearStorageData()
@@ -460,21 +502,6 @@ async function createMainWindow(
 	tm.create("https://example.com");
 	win.on("resize", () => tm.handleResize());
 
-	// Downloads (Stage 1.6).
-	const downloadsMgr = new DownloadManager({
-		session: session.defaultSession,
-		dialog: {
-			showSaveDialog: (opts) => dialog.showSaveDialog(win, opts),
-		},
-		defaultDir: app.getPath("downloads"),
-		broadcast: (rec) => {
-			if (!win.isDestroyed()) win.webContents.send("downloads:progress", rec);
-		},
-		openFolder: (p) => {
-			void shell.openPath(p);
-		},
-	});
-	const unregisterDownloads = registerDownloadsIpc(downloadsMgr);
 	const orchestrator = createOrchestrator({
 		tabManager: tm,
 		policy,

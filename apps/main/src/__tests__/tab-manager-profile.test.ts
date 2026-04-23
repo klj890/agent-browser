@@ -111,6 +111,41 @@ describe("TabManager incognito + profile", () => {
 		tm.close(id);
 		expect(onIncognitoEmpty).not.toHaveBeenCalled();
 	});
+
+	it("onPartitionSeen fires once per distinct partition", () => {
+		const onPartitionSeen = vi.fn();
+		const resolve = (id: string) =>
+			id === "work" ? "persist:profile-work" : undefined;
+		const { tm } = setup({
+			onPartitionSeen,
+			resolveProfilePartition: resolve,
+		});
+		// Two tabs in default profile → one fire for persist:default.
+		tm.create("https://a/");
+		tm.create("https://b/");
+		// Two tabs in work profile → one fire for persist:profile-work.
+		tm.create("https://c/", { profileId: "work" });
+		tm.create("https://d/", { profileId: "work" });
+		// Two independent incognito tabs → two distinct partitions → two fires.
+		tm.create("https://e/", { incognito: true });
+		tm.create("https://f/", { incognito: true });
+
+		expect(onPartitionSeen).toHaveBeenCalledTimes(4);
+		const partitions = onPartitionSeen.mock.calls.map((c) => c[0]);
+		expect(partitions).toContain("persist:default");
+		expect(partitions).toContain("persist:profile-work");
+		expect(partitions.filter((p) => p.startsWith("incognito:"))).toHaveLength(
+			2,
+		);
+		// ctx shape check for one of the incognito calls.
+		const incognitoCall = onPartitionSeen.mock.calls.find((c) =>
+			(c[0] as string).startsWith("incognito:"),
+		);
+		expect(incognitoCall?.[1]).toEqual({
+			isIncognito: true,
+			profileId: undefined,
+		});
+	});
 });
 
 describe("TabManager navigationHook gets incognito context", () => {

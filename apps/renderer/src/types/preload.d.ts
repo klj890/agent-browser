@@ -243,6 +243,9 @@ export interface DownloadRecordView {
 	received: number;
 	total: number;
 	started_at: number;
+	partition: string;
+	ephemeral: boolean;
+	profileId?: string;
 }
 
 export interface AgentBrowserBridge {

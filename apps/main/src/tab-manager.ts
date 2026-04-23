@@ -142,6 +142,16 @@ export interface TabManagerDeps {
 	 */
 	onIncognitoPartitionEmpty?: (partition: string) => void;
 	/**
+	 * Called the FIRST time a given partition is used by this TabManager.
+	 * index.ts uses it to register per-session will-download listeners so
+	 * non-default profiles and incognito downloads route through the
+	 * DownloadManager instead of Electron's silent default pipeline.
+	 */
+	onPartitionSeen?: (
+		partition: string,
+		ctx: { isIncognito: boolean; profileId?: string },
+	) => void;
+	/**
 	 * Default profile id. When create() receives neither incognito nor profileId,
 	 * the tab inherits this profile (defaults to persist:default).
 	 */
@@ -155,6 +165,11 @@ export class TabManager {
 	private readonly createView: (partition: string) => BrowserViewLike;
 	private readonly navigationHook?: TabNavigationHook;
 	private readonly onIncognitoPartitionEmpty?: (partition: string) => void;
+	private readonly onPartitionSeen?: (
+		partition: string,
+		ctx: { isIncognito: boolean; profileId?: string },
+	) => void;
+	private readonly seenPartitions = new Set<string>();
 	private readonly defaultProfileId: string;
 	private readonly resolveProfilePartition?: (
 		profileId: string,
@@ -169,6 +184,7 @@ export class TabManager {
 		this.createView = deps.createView ?? defaultCreateView;
 		this.navigationHook = deps.navigationHook;
 		this.onIncognitoPartitionEmpty = deps.onIncognitoPartitionEmpty;
+		this.onPartitionSeen = deps.onPartitionSeen;
 		this.defaultProfileId = deps.defaultProfileId ?? "default";
 		this.resolveProfilePartition = deps.resolveProfilePartition;
 	}
@@ -181,6 +197,18 @@ export class TabManager {
 		}
 		const id = nanoid();
 		const { partition, profileId, isIncognito } = this.resolvePartition(opts);
+		// Notify on first use of a partition so hosts (DownloadManager) can
+		// wire per-session listeners. Fires BEFORE createView so the
+		// will-download handler is live when Electron dispatches events from
+		// the new Session.
+		if (!this.seenPartitions.has(partition)) {
+			this.seenPartitions.add(partition);
+			try {
+				this.onPartitionSeen?.(partition, { isIncognito, profileId });
+			} catch (err) {
+				console.warn("[tab-manager] onPartitionSeen threw:", err);
+			}
+		}
 		const view = this.createView(partition);
 		const tab: Tab = {
 			id,
