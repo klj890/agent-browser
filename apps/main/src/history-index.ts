@@ -77,6 +77,13 @@ function vecToBuffer(vec: Float32Array): Buffer {
 }
 
 function bufferToVec(buf: Buffer, dim: number): Float32Array {
+	// A corrupt BLOB whose byteLength isn't a multiple of 4 would throw out
+	// of Float32Array's constructor; treat that as "all zeros" rather than
+	// crashing the search path — the caller's similarity loop will just
+	// contribute 0 for that row.
+	if (buf.byteLength % 4 !== 0) {
+		return new Float32Array(dim);
+	}
 	// Fast path: when the buffer is Float32-aligned, build a view directly
 	// over the underlying ArrayBuffer — no copy. In search hot loops over
 	// thousands of rows this is materially cheaper than slice() each time.
