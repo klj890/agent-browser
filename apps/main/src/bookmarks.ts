@@ -30,24 +30,27 @@ export class BookmarksStore {
 		const title = input.title ?? input.url;
 		const now = input.createdAt ?? Date.now();
 		const db = this.appDb.db;
-		const maxRow = db
-			.prepare(
-				"SELECT COALESCE(MAX(position), -1) AS maxpos FROM bookmarks WHERE folder = ?",
-			)
-			.get(folder) as { maxpos: number };
-		const position = (maxRow?.maxpos ?? -1) + 1;
+		// Atomic: a scalar subquery computes the next position in the same
+		// statement as the INSERT, so concurrent add() calls cannot observe
+		// a stale MAX(position) and collide on the same slot.
+		//
 		// On insert: created_at = updated_at = now.
-		// On conflict: keep created_at, refresh title + updated_at so sync
-		// push can catch the edit via `updated_at > watermark`.
+		// On conflict(url, folder): keep created_at + position, refresh
+		// title + updated_at so sync push can pick up the edit via
+		// `updated_at > watermark`.
 		const info = db
 			.prepare(
 				`INSERT INTO bookmarks (url, title, folder, position, created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?, ?)
+				 VALUES (
+				   ?, ?, ?,
+				   (SELECT COALESCE(MAX(position), -1) + 1 FROM bookmarks WHERE folder = ?),
+				   ?, ?
+				 )
 				 ON CONFLICT(url, folder) DO UPDATE
 				   SET title = excluded.title,
 				       updated_at = excluded.updated_at`,
 			)
-			.run(input.url, title, folder, position, now, now);
+			.run(input.url, title, folder, folder, now, now);
 		const id = Number(info.lastInsertRowid);
 		const row = db
 			.prepare(
