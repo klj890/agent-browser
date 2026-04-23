@@ -15,11 +15,15 @@ function mkDb(): AppDatabase {
 	return new AppDatabase(":memory:");
 }
 
-/** Wait for fire-and-forget upsert microtasks to drain. */
-async function flush(): Promise<void> {
-	for (let i = 0; i < 10; i++) {
-		await Promise.resolve();
-	}
+/**
+ * Wait for fire-and-forget upsert work queued by recordWithIndex to drain.
+ * The store serializes embeddings on a single promise tail so a burst of
+ * pulls (P1-16 sync) can't spawn hundreds of parallel transformer runs;
+ * tests await that tail directly via waitForEmbeddings().
+ */
+async function flush(store?: HistoryStore): Promise<void> {
+	if (store) await store.waitForEmbeddings();
+	for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
 describe("HistoryStore + RedactionPipeline", () => {
@@ -41,7 +45,7 @@ describe("HistoryStore + RedactionPipeline", () => {
 		const jwt =
 			"eyJabcdefghij.klmnopqrstuvwxyz0123456789.abcdefghij0123456789xyz";
 		store.recordWithIndex(`https://example.com/?token=${jwt}`, "Login page");
-		await flush();
+		await flush(store);
 
 		expect(seen).toHaveLength(1);
 		expect(seen[0]).not.toContain(jwt);
@@ -61,7 +65,7 @@ describe("HistoryStore + RedactionPipeline", () => {
 
 		const id = store.recordWithIndex("https://ok.com/", "OK");
 		expect(id).toBeGreaterThan(0);
-		await flush();
+		await flush(store);
 
 		// History row is present even though embed threw.
 		expect(store.list()).toHaveLength(1);
@@ -79,7 +83,7 @@ describe("HistoryStore + RedactionPipeline", () => {
 
 		store.recordWithIndex("https://a/", "a");
 		store.recordWithIndex("https://b/", "b");
-		await flush();
+		await flush(store);
 		expect(idx.count()).toBe(2);
 
 		store.clear();
@@ -106,7 +110,7 @@ describe("HistoryStore + RedactionPipeline", () => {
 		store.recordWithIndex("https://cat.example.com/", "cat");
 		store.recordWithIndex("https://dog.example.com/", "dog");
 		store.recordWithIndex("https://fish.example.com/", "fish");
-		await flush();
+		await flush(store);
 
 		const hits = await store.semanticSearch("dog", 10);
 		expect(hits[0]?.url).toBe("https://dog.example.com/");

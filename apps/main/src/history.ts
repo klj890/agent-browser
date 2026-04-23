@@ -138,6 +138,11 @@ export class HistoryStore {
 	 * Record a visit and (if an index is attached) asynchronously embed the
 	 * redacted `title + " " + url` string. Returns the new row id; returns 0
 	 * when the URL was filtered out.
+	 *
+	 * Embedding work is serialized through a single-slot queue so a burst of
+	 * calls (e.g. SyncEngine.pullNow applying hundreds of remote rows at
+	 * once) cannot fork hundreds of concurrent transformers.js runs that
+	 * would spike CPU / memory.
 	 */
 	recordWithIndex(
 		url: string,
@@ -150,11 +155,29 @@ export class HistoryStore {
 		if (!idx) return id;
 		const raw = `${title ?? ""} ${url}`.trim();
 		const text = this.redactor ? this.redactor.filter(raw) : raw;
-		// Fire-and-forget; failures must not crash the main process.
-		void idx.upsert(id, text).catch((err) => {
-			console.warn("[history-index] upsert failed:", err);
-		});
+		this.enqueueEmbed(idx, id, text);
 		return id;
+	}
+
+	/** Serialize embedding work to at most one in-flight job per store. */
+	private embedTail: Promise<unknown> = Promise.resolve();
+	private enqueueEmbed(idx: HistoryIndex, id: number, text: string): void {
+		this.embedTail = this.embedTail
+			.catch(() => undefined)
+			.then(() =>
+				idx.upsert(id, text).catch((err) => {
+					console.warn("[history-index] upsert failed:", err);
+				}),
+			);
+	}
+
+	/**
+	 * Await any in-flight embed jobs kicked off by recordWithIndex. Useful
+	 * in tests that need to assert on the semantic index immediately after
+	 * a burst of records; production code can fire-and-forget.
+	 */
+	waitForEmbeddings(): Promise<unknown> {
+		return this.embedTail;
 	}
 
 	list(limit = 50, offset = 0): HistoryEntry[] {
