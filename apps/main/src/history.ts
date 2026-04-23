@@ -195,15 +195,26 @@ export class HistoryStore {
 	/**
 	 * Semantic search via the attached HistoryIndex. Falls back to empty
 	 * array if no index is attached. Returns entries ordered by similarity.
+	 *
+	 * Uses a single `WHERE id IN (...)` round-trip to hydrate rows instead
+	 * of issuing one SELECT per hit. Preserves the score ranking by
+	 * re-projecting the server rows back through the original hit order.
 	 */
 	async semanticSearch(q: string, limit = 20): Promise<HistoryEntry[]> {
 		if (!this.index) return [];
 		const hits: SemanticHit[] = await this.index.search(q, limit);
 		if (hits.length === 0) return [];
-		// Hydrate ordered by score.
+		const ids = hits.map((h) => h.id);
+		const placeholders = ids.map(() => "?").join(",");
+		const rows = this.appDb.db
+			.prepare(
+				`SELECT id, url, title, visited_at FROM history WHERE id IN (${placeholders})`,
+			)
+			.all(...ids) as HistoryEntry[];
+		const byId = new Map<number, HistoryEntry>(rows.map((r) => [r.id, r]));
 		const out: HistoryEntry[] = [];
-		for (const h of hits) {
-			const row = this.getByIdsStmt.get(h.id) as HistoryEntry | undefined;
+		for (const id of ids) {
+			const row = byId.get(id);
 			if (row) out.push(row);
 		}
 		return out;
