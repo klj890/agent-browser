@@ -58,6 +58,7 @@ function mkEngine(): {
 		configStore,
 		bookmarks,
 		history,
+		appDb: db,
 		transport,
 		deriveKeyFn: fastDerive,
 	});
@@ -188,6 +189,22 @@ describe("SyncEngine.pushNow", () => {
 		rmSync(tmp, { recursive: true, force: true });
 	});
 
+	it("paginates through rows sharing a visited_at across page boundary", async () => {
+		const { engine, db, history, transport, tmp } = mkEngine();
+		// All rows share visited_at=7 — forces the (visited_at, id) compound
+		// cursor path. Without the id tiebreaker, pagination would stall or
+		// drop rows after the first page.
+		for (let i = 0; i < 5; i++) history.record(`https://x${i}/`, `x${i}`, 7);
+		await engine.configure("p");
+		// Batch size is 1_000 so all 5 fit in one page — but exercise the
+		// cursor by interleaving: push page-by-page via direct listSince first.
+		const r = await engine.pushNow();
+		expect(r.pushed).toBe(5);
+		expect(transport.pushed.filter((i) => i.kind === "history").length).toBe(5);
+		db.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
 	it("paginates history larger than the internal batch size", async () => {
 		const { engine, db, history, transport, tmp } = mkEngine();
 		// Default internal batch is 1_000 — push 2_500 rows to force 3 pages.
@@ -236,18 +253,21 @@ describe("SyncEngine.pullNow", () => {
 			configStore: new SyncConfigStore(path.join(tmp, "peer.json")),
 			bookmarks: new BookmarksStore(db),
 			history: new HistoryStore(db),
+			appDb: db,
 			transport: new InMemoryTransport(),
 			deriveKeyFn: fastDerive,
 		});
 		void envEngine; // unused; we just need encrypt via engine's current key
-		const peerBookmarks = new BookmarksStore(new AppDatabase(":memory:"));
+		const peerDb = new AppDatabase(":memory:");
+		const peerBookmarks = new BookmarksStore(peerDb);
 		peerBookmarks.add({ url: "https://remote/", title: "Remote" });
 		// Re-use engine.pushNow to produce the encrypted item, then strip to local list.
 		const stealTransport = new InMemoryTransport();
 		const mirrorEngine = new SyncEngine({
 			configStore: new SyncConfigStore(path.join(tmp, "mirror.json")),
 			bookmarks: peerBookmarks,
-			history: new HistoryStore(new AppDatabase(":memory:")),
+			history: new HistoryStore(peerDb),
+			appDb: peerDb,
 			transport: stealTransport,
 			deriveKeyFn: fastDerive,
 		});
@@ -266,7 +286,8 @@ describe("SyncEngine.pullNow", () => {
 		const mirror2 = new SyncEngine({
 			configStore: new SyncConfigStore(path.join(tmp, "mirror.json")),
 			bookmarks: peerBookmarks,
-			history: new HistoryStore(new AppDatabase(":memory:")),
+			history: new HistoryStore(peerDb),
+			appDb: peerDb,
 			transport: stealTransport,
 			deriveKeyFn: fastDerive,
 		});

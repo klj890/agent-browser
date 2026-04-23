@@ -74,14 +74,45 @@ describe("HistoryStore", () => {
 		db.close();
 	});
 
-	it("listSince paginates ascending by visited_at", () => {
+	it("listSince paginates strictly ascending by (visited_at, id)", () => {
 		const db = mkDb();
 		const h = new HistoryStore(db);
 		for (let i = 1; i <= 5; i++) h.record(`https://x${i}.com/`, `x${i}`, i);
-		expect(h.listSince(0, 2).map((e) => e.visited_at)).toEqual([1, 2]);
-		expect(h.listSince(2, 2).map((e) => e.visited_at)).toEqual([3, 4]);
-		expect(h.listSince(4, 2).map((e) => e.visited_at)).toEqual([5]);
-		expect(h.listSince(5, 2)).toEqual([]);
+		// Start from (0,0): first page = rows 1,2 (visited_at 1 and 2).
+		const page1 = h.listSince(0, 0, 2);
+		expect(page1.map((e) => e.visited_at)).toEqual([1, 2]);
+		const lastP1 = page1[page1.length - 1];
+		// Next page starts strictly after (2, page1last.id).
+		const page2 = h.listSince(lastP1?.visited_at ?? 0, lastP1?.id ?? 0, 2);
+		expect(page2.map((e) => e.visited_at)).toEqual([3, 4]);
+		const lastP2 = page2[page2.length - 1];
+		const page3 = h.listSince(lastP2?.visited_at ?? 0, lastP2?.id ?? 0, 2);
+		expect(page3.map((e) => e.visited_at)).toEqual([5]);
+		const lastP3 = page3[page3.length - 1];
+		expect(h.listSince(lastP3?.visited_at ?? 0, lastP3?.id ?? 0, 2)).toEqual(
+			[],
+		);
+		db.close();
+	});
+
+	it("listSince does not drop rows sharing a visited_at across page boundaries", () => {
+		const db = mkDb();
+		const h = new HistoryStore(db);
+		// All three rows share visited_at=7 but differ in url — id tiebreaker
+		// must let us paginate through all of them.
+		h.record("https://a/", "A", 7);
+		h.record("https://b/", "B", 7);
+		h.record("https://c/", "C", 7);
+		const page1 = h.listSince(0, 0, 2);
+		expect(page1.length).toBe(2);
+		const last1 = page1[page1.length - 1];
+		const page2 = h.listSince(last1?.visited_at ?? 0, last1?.id ?? 0, 2);
+		expect(page2.length).toBe(1);
+		// None dropped.
+		const allUrls = new Set([...page1, ...page2].map((r) => r.url));
+		expect(allUrls).toEqual(
+			new Set(["https://a/", "https://b/", "https://c/"]),
+		);
 		db.close();
 	});
 });

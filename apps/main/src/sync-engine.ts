@@ -15,6 +15,7 @@
  */
 import type { BookmarksStore } from "./bookmarks.js";
 import type { HistoryStore } from "./history.js";
+import type { AppDatabase } from "./storage/sqlite.js";
 import type { SyncConfig, SyncConfigStore } from "./sync-config.js";
 import {
 	decrypt,
@@ -63,6 +64,12 @@ export interface SyncEngineDeps {
 	configStore: SyncConfigStore;
 	bookmarks: BookmarksStore;
 	history: HistoryStore;
+	/**
+	 * Shared AppDatabase used by both stores — SyncEngine uses it to wrap
+	 * pull-apply loops in a single transaction, which cuts per-row fsync
+	 * overhead and makes an interrupted pull atomic (all or nothing).
+	 */
+	appDb: AppDatabase;
 	transport: SyncTransport;
 	/** Test hook to swap in a faster key derivation during tests. */
 	deriveKeyFn?: (passphrase: string, salt: Buffer) => Promise<Buffer>;
@@ -104,6 +111,7 @@ export class SyncEngine {
 			lastHistoryCursor: 0,
 			lastPushedBookmarkAt: 0,
 			lastPushedHistoryAt: 0,
+			lastPushedHistoryId: 0,
 			serverUrl: serverUrl ?? this.cfg.serverUrl ?? null,
 		};
 		this.deps.configStore.save(this.cfg);
@@ -178,13 +186,18 @@ export class SyncEngine {
 				updatedAt: b.updated_at,
 			});
 		}
-		// Paginate history by `visited_at` ascending so we catch every row
-		// past the watermark even when the user accumulated > any single-page
-		// worth of visits between syncs.
+		// Paginate history by (visited_at, id) ascending so rows sharing a
+		// visited_at that straddle a page boundary still get picked up —
+		// without the id tiebreaker a `>` filter would drop them.
 		const HISTORY_PAGE = 1_000;
-		let historyCursor = this.cfg.lastPushedHistoryAt;
+		let cursorVisitedAt = this.cfg.lastPushedHistoryAt;
+		let cursorId = this.cfg.lastPushedHistoryId ?? 0;
 		while (true) {
-			const batch = this.deps.history.listSince(historyCursor, HISTORY_PAGE);
+			const batch = this.deps.history.listSince(
+				cursorVisitedAt,
+				cursorId,
+				HISTORY_PAGE,
+			);
 			if (batch.length === 0) break;
 			for (const h of batch) {
 				items.push({
@@ -200,7 +213,14 @@ export class SyncEngine {
 					),
 					updatedAt: h.visited_at,
 				});
-				if (h.visited_at > historyCursor) historyCursor = h.visited_at;
+				// Advance compound cursor using strict ordering (visited_at asc, id asc).
+				if (
+					h.visited_at > cursorVisitedAt ||
+					(h.visited_at === cursorVisitedAt && h.id > cursorId)
+				) {
+					cursorVisitedAt = h.visited_at;
+					cursorId = h.id;
+				}
 			}
 			if (batch.length < HISTORY_PAGE) break;
 		}
@@ -208,17 +228,19 @@ export class SyncEngine {
 		await this.deps.transport.push(items);
 		// Advance the per-kind push watermark. NB: these are independent of the
 		// pull cursors — advancing them here must not shrink the pull horizon.
-		let maxHistory = this.cfg.lastPushedHistoryAt;
 		let maxBookmark = this.cfg.lastPushedBookmarkAt;
 		for (const it of items) {
-			if (it.kind === "history" && it.updatedAt > maxHistory)
-				maxHistory = it.updatedAt;
 			if (it.kind === "bookmark" && it.updatedAt > maxBookmark)
 				maxBookmark = it.updatedAt;
 		}
 		let changed = false;
-		if (maxHistory > this.cfg.lastPushedHistoryAt) {
-			this.cfg.lastPushedHistoryAt = maxHistory;
+		if (cursorVisitedAt > this.cfg.lastPushedHistoryAt) {
+			this.cfg.lastPushedHistoryAt = cursorVisitedAt;
+			changed = true;
+		}
+		const prevHistoryId = this.cfg.lastPushedHistoryId ?? 0;
+		if (cursorId !== prevHistoryId) {
+			this.cfg.lastPushedHistoryId = cursorId;
 			changed = true;
 		}
 		if (maxBookmark > this.cfg.lastPushedBookmarkAt) {
@@ -241,58 +263,65 @@ export class SyncEngine {
 		const bm = await this.deps.transport.pullBookmarks(
 			this.cfg.lastBookmarksCursor,
 		);
-		for (const it of bm.items) {
-			if (it.kind !== "bookmark") {
-				skipped++;
-				continue;
-			}
-			try {
-				const row = JSON.parse(decrypt(key, it.envelope)) as {
-					url: string;
-					title?: string;
-					folder?: string;
-				};
-				// BookmarksStore.add upserts on (url, folder) conflict → last-writer-wins.
-				this.deps.bookmarks.add({
-					url: row.url,
-					title: row.title,
-					folder: row.folder,
-				});
-				applied++;
-			} catch {
-				skipped++;
-			}
-		}
-		if (bm.cursor > this.cfg.lastBookmarksCursor) {
-			this.cfg.lastBookmarksCursor = bm.cursor;
-		}
-
 		const hist = await this.deps.transport.pullHistory(
 			this.cfg.lastHistoryCursor,
 		);
-		for (const it of hist.items) {
-			if (it.kind !== "history") {
-				skipped++;
-				continue;
+
+		// Apply all decrypted rows in a single transaction: ~O(N) fsyncs
+		// collapse into one, and a crash mid-apply leaves the DB clean
+		// instead of half-populated.
+		const applyAll = this.deps.appDb.db.transaction(() => {
+			for (const it of bm.items) {
+				if (it.kind !== "bookmark") {
+					skipped++;
+					continue;
+				}
+				try {
+					const row = JSON.parse(decrypt(key, it.envelope)) as {
+						url: string;
+						title?: string;
+						folder?: string;
+					};
+					// BookmarksStore.add upserts on (url, folder) conflict → LWW.
+					this.deps.bookmarks.add({
+						url: row.url,
+						title: row.title,
+						folder: row.folder,
+					});
+					applied++;
+				} catch {
+					skipped++;
+				}
 			}
-			try {
-				const row = JSON.parse(decrypt(key, it.envelope)) as {
-					url: string;
-					title?: string;
-					visited_at: number;
-				};
-				// Route through recordWithIndex so pulled rows enter the local
-				// semantic embedding index too — otherwise they're invisible to
-				// Stage 11 / history:semanticSearch on this device.
-				this.deps.history.recordWithIndex(
-					row.url,
-					row.title ?? "",
-					row.visited_at,
-				);
-				applied++;
-			} catch {
-				skipped++;
+			for (const it of hist.items) {
+				if (it.kind !== "history") {
+					skipped++;
+					continue;
+				}
+				try {
+					const row = JSON.parse(decrypt(key, it.envelope)) as {
+						url: string;
+						title?: string;
+						visited_at: number;
+					};
+					// Route through recordWithIndex so pulled rows enter the local
+					// semantic embedding index too — otherwise they're invisible to
+					// Stage 11 / history:semanticSearch on this device.
+					this.deps.history.recordWithIndex(
+						row.url,
+						row.title ?? "",
+						row.visited_at,
+					);
+					applied++;
+				} catch {
+					skipped++;
+				}
 			}
+		});
+		applyAll();
+
+		if (bm.cursor > this.cfg.lastBookmarksCursor) {
+			this.cfg.lastBookmarksCursor = bm.cursor;
 		}
 		if (hist.cursor > this.cfg.lastHistoryCursor) {
 			this.cfg.lastHistoryCursor = hist.cursor;

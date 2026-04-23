@@ -31,6 +31,12 @@ export interface SyncConfig {
 	 */
 	lastPushedBookmarkAt: number;
 	lastPushedHistoryAt: number;
+	/**
+	 * Tiebreaker paired with `lastPushedHistoryAt` — when multiple history
+	 * rows share a `visited_at` we also need the last id pushed so the
+	 * next page can continue strictly after (visited_at, id).
+	 */
+	lastPushedHistoryId?: number;
 	serverUrl: string | null;
 }
 
@@ -42,6 +48,7 @@ export const EMPTY_SYNC_CONFIG: SyncConfig = {
 	lastHistoryCursor: 0,
 	lastPushedBookmarkAt: 0,
 	lastPushedHistoryAt: 0,
+	lastPushedHistoryId: 0,
 	serverUrl: null,
 };
 

@@ -57,7 +57,7 @@ export class HistoryStore {
 		[string, number]
 	>;
 	private readonly listSinceStmt: import("better-sqlite3").Statement<
-		[number, number]
+		[number, number, number, number]
 	>;
 	private readonly existingIdStmt: import("better-sqlite3").Statement<
 		[string, number]
@@ -75,8 +75,14 @@ export class HistoryStore {
 		this.insertStmt = db.prepare(
 			"INSERT OR IGNORE INTO history (url, title, visited_at) VALUES (?, ?, ?)",
 		);
+		// Compound cursor on (visited_at, id) so rows sharing a visited_at
+		// that straddle a page boundary aren't dropped by the next page.
 		this.listSinceStmt = db.prepare(
-			"SELECT id, url, title, visited_at FROM history WHERE visited_at > ? ORDER BY visited_at ASC LIMIT ?",
+			`SELECT id, url, title, visited_at FROM history
+			 WHERE visited_at > ?
+			    OR (visited_at = ? AND id > ?)
+			 ORDER BY visited_at ASC, id ASC
+			 LIMIT ?`,
 		);
 		this.existingIdStmt = db.prepare(
 			"SELECT id FROM history WHERE url = ? AND visited_at = ?",
@@ -156,16 +162,24 @@ export class HistoryStore {
 	}
 
 	/**
-	 * Ascending pagination by `visited_at`. Used by SyncEngine.pushNow to
-	 * iterate every unsynced row regardless of total history size, avoiding
-	 * the hard-coded `list(10_000, 0)` data-loss cliff.
+	 * Strict ascending pagination by (visited_at, id) — the id acts as a
+	 * tiebreaker so rows sharing the same visited_at can span pages safely.
 	 *
-	 * Pass `since=0` to start from the beginning; pass the last returned
-	 * row's `visited_at` to fetch the next page. Stop when the result
-	 * is empty.
+	 * `afterVisitedAt = 0, afterId = 0` starts from the beginning. To fetch
+	 * the next page, pass the last returned row's `visited_at` and `id`.
+	 * Stop when the result is empty.
 	 */
-	listSince(since: number, limit: number): HistoryEntry[] {
-		return this.listSinceStmt.all(since, limit) as HistoryEntry[];
+	listSince(
+		afterVisitedAt: number,
+		afterId: number,
+		limit: number,
+	): HistoryEntry[] {
+		return this.listSinceStmt.all(
+			afterVisitedAt,
+			afterVisitedAt,
+			afterId,
+			limit,
+		) as HistoryEntry[];
 	}
 
 	search(q: string, limit = 50): HistoryEntry[] {

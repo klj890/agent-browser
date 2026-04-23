@@ -415,6 +415,7 @@ async function createMainWindow(
 		configStore: syncConfigStore,
 		bookmarks: bookmarksStore,
 		history: historyStore,
+		appDb,
 		transport: syncTransport,
 	});
 	const unregisterSync = registerSyncIpc(syncEngine);
