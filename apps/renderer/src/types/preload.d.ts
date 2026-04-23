@@ -301,6 +301,7 @@ export interface AgentBrowserBridge {
 		disable: () => Promise<SyncStatusView>;
 		pushNow: () => Promise<{ pushed: number }>;
 		pullNow: () => Promise<{ applied: number; skipped: number }>;
+		updateServerUrl: (serverUrl: string | null) => Promise<SyncStatusView>;
 	};
 	policy: {
 		get: () => Promise<AdminPolicyView>;

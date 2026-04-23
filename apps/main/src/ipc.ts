@@ -429,6 +429,16 @@ export function registerSyncIpc(engine: SyncEngine): () => void {
 		],
 		["sync:pushNow", async () => engine.pushNow()],
 		["sync:pullNow", async () => engine.pullNow()],
+		[
+			"sync:updateServerUrl",
+			(_e, serverUrl: unknown) => {
+				const u =
+					typeof serverUrl === "string" && serverUrl.length > 0
+						? serverUrl
+						: null;
+				return engine.updateServerUrl(u);
+			},
+		],
 	];
 	for (const [ch, fn] of handlers) ipcMain.handle(ch, fn);
 	return () => {

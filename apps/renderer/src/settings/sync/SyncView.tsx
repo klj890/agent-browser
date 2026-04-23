@@ -228,23 +228,68 @@ export function SyncView() {
 			)}
 
 			{configured && unlocked && (
-				<div className="settings-editor">
-					<h3>Actions</h3>
-					<div className="settings-actions">
-						<button type="button" onClick={onPush} disabled={busy}>
-							Push now
-						</button>
-						<button type="button" onClick={onPull} disabled={busy}>
-							Pull now
-						</button>
-						<button type="button" onClick={onLock} disabled={busy}>
-							Lock
-						</button>
-						<button type="button" onClick={onDisable} disabled={busy}>
-							Disable sync
-						</button>
+				<>
+					<div className="settings-editor">
+						<h3>Actions</h3>
+						<div className="settings-actions">
+							<button type="button" onClick={onPush} disabled={busy}>
+								Push now
+							</button>
+							<button type="button" onClick={onPull} disabled={busy}>
+								Pull now
+							</button>
+							<button type="button" onClick={onLock} disabled={busy}>
+								Lock
+							</button>
+							<button type="button" onClick={onDisable} disabled={busy}>
+								Disable sync
+							</button>
+						</div>
 					</div>
-				</div>
+					<form
+						className="settings-editor"
+						onSubmit={async (e) => {
+							e.preventDefault();
+							const bridge = window.agentBrowser?.sync;
+							if (!bridge) return;
+							clearMessages();
+							setBusy(true);
+							try {
+								const next = serverUrl.trim() || null;
+								const s = await bridge.updateServerUrl(next);
+								setStatus(s);
+								setInfo(
+									next
+										? `Server URL updated to ${next}. Next push/pull will use it.`
+										: "Cleared server URL — sync is now local-only.",
+								);
+							} catch (err) {
+								setError(err instanceof Error ? err.message : String(err));
+							} finally {
+								setBusy(false);
+							}
+						}}
+					>
+						<h3>Change server URL</h3>
+						<p className="settings-list-sub">
+							Repoint sync at a different backend without restarting. Does not
+							touch keys, cursors, or local data.
+						</p>
+						<label className="settings-field">
+							Server URL
+							<input
+								value={serverUrl}
+								onChange={(e) => setServerUrl(e.target.value)}
+								placeholder="https://sync.example.com or leave blank"
+							/>
+						</label>
+						<div className="settings-actions">
+							<button type="submit" disabled={busy}>
+								Update
+							</button>
+						</div>
+					</form>
+				</>
 			)}
 		</section>
 	);
