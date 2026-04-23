@@ -204,4 +204,18 @@ ALTER TABLE bookmarks ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
 UPDATE bookmarks SET updated_at = created_at WHERE updated_at = 0;
 `,
 	},
+	{
+		name: "007_bookmark_tombstones.sql",
+		sql: `
+CREATE TABLE IF NOT EXISTS bookmark_tombstones (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  folder TEXT NOT NULL,
+  url TEXT NOT NULL,
+  deleted_at INTEGER NOT NULL,
+  UNIQUE(folder, url)
+);
+CREATE INDEX IF NOT EXISTS bookmark_tombstones_deleted
+  ON bookmark_tombstones(deleted_at ASC, id ASC);
+`,
+	},
 ];

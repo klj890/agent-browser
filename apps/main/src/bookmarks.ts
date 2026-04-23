@@ -21,6 +21,29 @@ export interface AddBookmarkInput {
 	createdAt?: number;
 }
 
+/**
+ * Record of a deleted bookmark surviving long enough to propagate through
+ * sync to every peer. `(folder, url)` is the natural key that ties it
+ * back to a live bookmark on another device.
+ */
+export interface BookmarkTombstone {
+	id: number;
+	folder: string;
+	url: string;
+	deleted_at: number;
+}
+
+export interface RemoveBookmarkOpts {
+	/** Pin timestamp for tests / deterministic sync replays. */
+	deletedAt?: number;
+	/**
+	 * Set true when applying a tombstone received from a peer — we still want
+	 * to delete the local row but should NOT re-write a tombstone (otherwise
+	 * the deletion bounces back out). Default false.
+	 */
+	skipTombstone?: boolean;
+}
+
 export class BookmarksStore {
 	constructor(private readonly appDb: AppDatabase) {}
 
@@ -30,6 +53,14 @@ export class BookmarksStore {
 		const title = input.title ?? input.url;
 		const now = input.createdAt ?? Date.now();
 		const db = this.appDb.db;
+		// A re-add after a delete must supersede the tombstone. Otherwise the
+		// next sync push could send BOTH a bookmark (updatedAt=now) and a
+		// tombstone (deletedAt=old) — a peer might apply the delete after the
+		// add and end up inconsistent. Dropping the tombstone here keeps the
+		// sync contract last-writer-wins per (folder, url).
+		db.prepare(
+			"DELETE FROM bookmark_tombstones WHERE folder = ? AND url = ?",
+		).run(folder, input.url);
 		// Atomic: a scalar subquery computes the next position in the same
 		// statement as the INSERT, so concurrent add() calls cannot observe
 		// a stale MAX(position) and collide on the same slot.
@@ -60,11 +91,87 @@ export class BookmarksStore {
 		return row;
 	}
 
-	remove(id: number): boolean {
+	/**
+	 * Delete a bookmark by id and (unless `skipTombstone`) record the
+	 * deletion so SyncEngine can propagate it. The read of (folder, url)
+	 * and the subsequent delete + tombstone insert run in one transaction:
+	 * either all three happen or none do, so a crash can't leave a live
+	 * row that the peer never hears about OR a tombstone for a row that's
+	 * still present.
+	 */
+	remove(id: number, opts: RemoveBookmarkOpts = {}): boolean {
+		const db = this.appDb.db;
+		const deletedAt = opts.deletedAt ?? Date.now();
+		const tx = db.transaction((rowId: number): boolean => {
+			const row = db
+				.prepare("SELECT folder, url FROM bookmarks WHERE id = ?")
+				.get(rowId) as { folder: string; url: string } | undefined;
+			if (!row) return false;
+			const info = db.prepare("DELETE FROM bookmarks WHERE id = ?").run(rowId);
+			if (Number(info.changes ?? 0) === 0) return false;
+			if (!opts.skipTombstone) {
+				db.prepare(
+					`INSERT INTO bookmark_tombstones (folder, url, deleted_at)
+					 VALUES (?, ?, ?)
+					 ON CONFLICT(folder, url) DO UPDATE SET deleted_at = excluded.deleted_at`,
+				).run(row.folder, row.url, deletedAt);
+			}
+			return true;
+		});
+		return tx(id) as boolean;
+	}
+
+	/**
+	 * Delete by (url, folder). Used by SyncEngine.pullNow to apply a peer's
+	 * tombstone: we look up the live row — if any — and delete it without
+	 * writing a new tombstone (skipTombstone=true).
+	 *
+	 * Returns true if a live row was actually removed.
+	 */
+	removeByUrlFolder(url: string, folder: string): boolean {
+		const row = this.appDb.db
+			.prepare("SELECT id FROM bookmarks WHERE url = ? AND folder = ?")
+			.get(url, folder) as { id: number } | undefined;
+		if (!row) return false;
+		return this.remove(row.id, { skipTombstone: true });
+	}
+
+	/**
+	 * Paginate tombstones for SyncEngine.pushNow. Same (at, id) compound
+	 * cursor pattern as live bookmarks / history so rows sharing a
+	 * deleted_at never straddle a page boundary silently.
+	 */
+	listTombstonesSince(
+		afterDeletedAt: number,
+		afterId: number,
+		limit: number,
+	): BookmarkTombstone[] {
+		return this.appDb.db
+			.prepare(
+				`SELECT * FROM bookmark_tombstones
+				 WHERE deleted_at > ?
+				    OR (deleted_at = ? AND id > ?)
+				 ORDER BY deleted_at ASC, id ASC
+				 LIMIT ?`,
+			)
+			.all(
+				afterDeletedAt,
+				afterDeletedAt,
+				afterId,
+				limit,
+			) as BookmarkTombstone[];
+	}
+
+	/**
+	 * Drop tombstones older than `keepMs` ms. Expected to run on a low-freq
+	 * schedule (daily routine) once every peer has had ample time to pull.
+	 */
+	gcTombstones(keepMs: number): number {
+		const cutoff = Date.now() - keepMs;
 		const info = this.appDb.db
-			.prepare("DELETE FROM bookmarks WHERE id = ?")
-			.run(id);
-		return Number(info.changes ?? 0) > 0;
+			.prepare("DELETE FROM bookmark_tombstones WHERE deleted_at < ?")
+			.run(cutoff);
+		return Number(info.changes ?? 0);
 	}
 
 	list(folder?: string): Bookmark[] {

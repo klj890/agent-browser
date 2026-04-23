@@ -204,12 +204,10 @@ export class SyncEngine {
 	}
 
 	/**
-	 * Push bookmarks + history rows that have changed since the last
-	 * watermark. Both streams paginate by a compound (timestamp, id) cursor
-	 * so rows sharing a timestamp never straddle a page boundary silently.
-	 *
-	 * Deletion is not yet synced — doing it correctly requires tombstones.
-	 * Documented in PLAN as follow-up work.
+	 * Push bookmarks + history rows + bookmark tombstones that have changed
+	 * since the last watermark. All three streams paginate by a compound
+	 * (timestamp, id) cursor so rows sharing a timestamp never straddle a
+	 * page boundary silently.
 	 */
 	async pushNow(): Promise<{ pushed: number }> {
 		const key = this.requireUnlocked();
@@ -285,6 +283,42 @@ export class SyncEngine {
 			if (batch.length < HISTORY_PAGE) break;
 		}
 
+		// Bookmark tombstones: same envelope shape as live rows (so the
+		// pointerId collides with the corresponding live row at the server
+		// layer — idempotent delete-vs-add) but we tag `deletedAt` so the
+		// peer knows to apply as a removal.
+		const TOMBSTONE_PAGE = 1_000;
+		let tAt = this.cfg.lastPushedTombstoneAt ?? 0;
+		let tId = this.cfg.lastPushedTombstoneId ?? 0;
+		while (true) {
+			const page = this.deps.bookmarks.listTombstonesSince(
+				tAt,
+				tId,
+				TOMBSTONE_PAGE,
+			);
+			if (page.length === 0) break;
+			for (const t of page) {
+				items.push({
+					pointerId: itemPointer(
+						key,
+						`bookmark:${JSON.stringify([t.folder, t.url])}`,
+					),
+					kind: "bookmark",
+					envelope: encrypt(
+						key,
+						JSON.stringify({ url: t.url, folder: t.folder }),
+					),
+					updatedAt: t.deleted_at,
+					deletedAt: t.deleted_at,
+				});
+				if (t.deleted_at > tAt || (t.deleted_at === tAt && t.id > tId)) {
+					tAt = t.deleted_at;
+					tId = t.id;
+				}
+			}
+			if (page.length < TOMBSTONE_PAGE) break;
+		}
+
 		if (items.length === 0) return { pushed: 0 };
 		await this.transport().push(items);
 
@@ -303,6 +337,14 @@ export class SyncEngine {
 		}
 		if ((this.cfg.lastPushedBookmarkId ?? 0) !== bmId) {
 			this.cfg.lastPushedBookmarkId = bmId;
+			changed = true;
+		}
+		if (tAt > (this.cfg.lastPushedTombstoneAt ?? 0)) {
+			this.cfg.lastPushedTombstoneAt = tAt;
+			changed = true;
+		}
+		if ((this.cfg.lastPushedTombstoneId ?? 0) !== tId) {
+			this.cfg.lastPushedTombstoneId = tId;
 			changed = true;
 		}
 		if (changed) this.deps.configStore.save(this.cfg);
@@ -338,6 +380,15 @@ export class SyncEngine {
 						folder?: string;
 						updated_at?: number;
 					};
+					if (it.deletedAt !== undefined) {
+						// Tombstone from a peer: remove matching local row but
+						// DON'T write a new tombstone locally — otherwise the
+						// delete would immediately bounce back to the server.
+						// skipTombstone inside BookmarksStore.remove handles that.
+						this.deps.bookmarks.removeByUrlFolder(row.url, row.folder ?? "");
+						applied++;
+						continue;
+					}
 					// Preserve the remote updated_at on local insert/upsert.
 					// Without this, add() would stamp Date.now() which is always
 					// greater than our push watermark, and the next pushNow() would

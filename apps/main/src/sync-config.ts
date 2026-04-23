@@ -38,6 +38,13 @@ export interface SyncConfig {
 	 */
 	lastPushedHistoryId?: number;
 	lastPushedBookmarkId?: number;
+	/**
+	 * Watermark for bookmark tombstones (deletes). Distinct from
+	 * lastPushedBookmarkAt so an "add, delete" sequence pushes both items
+	 * rather than a delete silently overshadowing the add on the watermark.
+	 */
+	lastPushedTombstoneAt?: number;
+	lastPushedTombstoneId?: number;
 	serverUrl: string | null;
 }
 
@@ -51,6 +58,8 @@ export const EMPTY_SYNC_CONFIG: SyncConfig = {
 	lastPushedHistoryAt: 0,
 	lastPushedHistoryId: 0,
 	lastPushedBookmarkId: 0,
+	lastPushedTombstoneAt: 0,
+	lastPushedTombstoneId: 0,
 	serverUrl: null,
 };
 
