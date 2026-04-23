@@ -131,4 +131,117 @@ describe("DownloadManager", () => {
 		expect(dialog.showSaveDialog).not.toHaveBeenCalled();
 		expect(item.setSavePath).toHaveBeenCalled();
 	});
+
+	it("attachSession routes per-partition + tags record with partition/profile/ephemeral", async () => {
+		const dialog: DialogLike = {
+			showSaveDialog: vi.fn(async () => ({
+				canceled: false,
+				filePath: "/tmp/out.bin",
+			})),
+		};
+		const broadcast = vi.fn();
+		const mgr = new DownloadManager({ dialog, defaultDir: "/tmp", broadcast });
+
+		const defaultSess = mkSession();
+		const workSess = mkSession();
+		const incogSess = mkSession();
+		mgr.attachSession(defaultSess.session, { partition: "persist:default" });
+		mgr.attachSession(workSess.session, {
+			partition: "persist:profile-work",
+			profileId: "work",
+		});
+		mgr.attachSession(incogSess.session, {
+			partition: "incognito:abc",
+			isIncognito: true,
+		});
+		expect(mgr.attachedPartitions().sort()).toEqual([
+			"incognito:abc",
+			"persist:default",
+			"persist:profile-work",
+		]);
+
+		// Trigger one download on each session.
+		const a = mkItem();
+		const b = mkItem();
+		const c = mkItem();
+		await defaultSess.emit.willDownload[0]?.(
+			{ preventDefault: () => {} },
+			a.item,
+		);
+		await workSess.emit.willDownload[0]?.({ preventDefault: () => {} }, b.item);
+		await incogSess.emit.willDownload[0]?.(
+			{ preventDefault: () => {} },
+			c.item,
+		);
+
+		const rows = mgr.list();
+		expect(rows).toHaveLength(3);
+		const byPartition = new Map(rows.map((r) => [r.partition, r]));
+		expect(byPartition.get("persist:default")?.ephemeral).toBe(false);
+		expect(byPartition.get("persist:default")?.profileId).toBeUndefined();
+		expect(byPartition.get("persist:profile-work")?.profileId).toBe("work");
+		expect(byPartition.get("persist:profile-work")?.ephemeral).toBe(false);
+		expect(byPartition.get("incognito:abc")?.ephemeral).toBe(true);
+	});
+
+	it("attachSession is idempotent per partition", () => {
+		const mgr = new DownloadManager({
+			dialog: { showSaveDialog: vi.fn() },
+			defaultDir: "/tmp",
+			broadcast: vi.fn(),
+		});
+		const { session } = mkSession();
+		expect(mgr.attachSession(session, { partition: "persist:p1" })).toBe(true);
+		expect(mgr.attachSession(session, { partition: "persist:p1" })).toBe(false);
+		expect(mgr.attachedPartitions()).toEqual(["persist:p1"]);
+	});
+
+	it("dropPartition purges records + calls session.off when available", async () => {
+		const dialog: DialogLike = {
+			showSaveDialog: vi.fn(async () => ({
+				canceled: false,
+				filePath: "/tmp/out",
+			})),
+		};
+		const off = vi.fn();
+		const { session, emit } = mkSession();
+		(session as SessionLike).off = off;
+		const mgr = new DownloadManager({
+			dialog,
+			defaultDir: "/tmp",
+			broadcast: vi.fn(),
+		});
+		mgr.attachSession(session, {
+			partition: "incognito:xx",
+			isIncognito: true,
+		});
+		const { item } = mkItem();
+		await emit.willDownload[0]?.({ preventDefault: () => {} }, item);
+		expect(mgr.list()).toHaveLength(1);
+
+		mgr.dropPartition("incognito:xx");
+		expect(off).toHaveBeenCalled();
+		expect(mgr.attachedPartitions()).toEqual([]);
+		expect(mgr.list()).toEqual([]);
+	});
+
+	it("legacy constructor with session attaches as persist:default", async () => {
+		const { session, emit } = mkSession();
+		const dialog: DialogLike = {
+			showSaveDialog: vi.fn(async () => ({
+				canceled: false,
+				filePath: "/tmp/legacy",
+			})),
+		};
+		const mgr = new DownloadManager({
+			session,
+			dialog,
+			defaultDir: "/tmp",
+			broadcast: vi.fn(),
+		});
+		expect(mgr.attachedPartitions()).toEqual(["persist:default"]);
+		const { item } = mkItem();
+		await emit.willDownload[0]?.({ preventDefault: () => {} }, item);
+		expect(mgr.list()[0]?.partition).toBe("persist:default");
+	});
 });
