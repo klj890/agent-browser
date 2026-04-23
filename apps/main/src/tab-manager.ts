@@ -28,6 +28,12 @@ export interface TabSummary {
 	active: boolean;
 	pinned: boolean;
 	openedByAgent: boolean;
+	/** True when the tab runs in an ephemeral incognito partition (P1-12). */
+	isIncognito: boolean;
+	/** Persistent profile id if the tab is bound to one; undefined for default/incognito. */
+	profileId?: string;
+	/** Electron session partition name — surfaced so renderer can group tabs by profile. */
+	partition: string;
 }
 
 export interface Tab {
@@ -42,6 +48,8 @@ export interface Tab {
 	partition: string;
 	pinned: boolean;
 	openedByAgent: boolean;
+	isIncognito: boolean;
+	profileId?: string;
 	/** Allocated lazily on first Agent use (getTabCdp). Never during create(). */
 	cdp?: CdpAdapter;
 	/** RefRegistry scoped to this tab's page lifetime; cleared on nav/reload/close. */
@@ -50,6 +58,10 @@ export interface Tab {
 
 export interface CreateTabOpts {
 	partition?: string;
+	/** Mutually exclusive with profileId — routes tab into a fresh incognito partition. */
+	incognito?: boolean;
+	/** Route tab into a named persistent profile partition. */
+	profileId?: string;
 	openedByAgent?: boolean;
 	background?: boolean;
 }
@@ -58,6 +70,8 @@ interface ClosedTabRecord {
 	url: string;
 	partition: string;
 	openedByAgent: boolean;
+	isIncognito: boolean;
+	profileId?: string;
 }
 
 const CHROME_HEIGHT = 72; // tabstrip (32) + addressbar (40) approx
@@ -81,6 +95,11 @@ export interface BrowserViewLike {
 		isDestroyed: () => boolean;
 		/** Optional — only present when running on real Electron (not mocks). */
 		debugger?: unknown;
+		/** Optional — used by reading-mode.extractArticle (P1-13). */
+		executeJavaScript?: (
+			code: string,
+			userGesture?: boolean,
+		) => Promise<unknown>;
 	};
 	setBounds: (b: {
 		x: number;
@@ -96,8 +115,19 @@ export interface BrowserViewLike {
 	}) => void;
 }
 
+export interface TabNavigationContext {
+	isIncognito: boolean;
+	profileId?: string;
+	partition: string;
+}
+
 export interface TabNavigationHook {
-	onNavigate?: (tabId: string, url: string, title: string) => void;
+	onNavigate?: (
+		tabId: string,
+		url: string,
+		title: string,
+		ctx: TabNavigationContext,
+	) => void;
 }
 
 export interface TabManagerDeps {
@@ -105,12 +135,30 @@ export interface TabManagerDeps {
 	createView?: (partition: string) => BrowserViewLike;
 	/** Optional nav hook — used by history + persona auto-switch. */
 	navigationHook?: TabNavigationHook;
+	/**
+	 * Called when the last tab of an incognito partition closes. Implementers
+	 * should clear Electron session storage for that partition so no cookies
+	 * or localStorage survive in memory / on disk (P1-12).
+	 */
+	onIncognitoPartitionEmpty?: (partition: string) => void;
+	/**
+	 * Default profile id. When create() receives neither incognito nor profileId,
+	 * the tab inherits this profile (defaults to persist:default).
+	 */
+	defaultProfileId?: string;
+	/** Resolve a profileId → partition string. Injected by index.ts using ProfileStore. */
+	resolveProfilePartition?: (profileId: string) => string | undefined;
 }
 
 export class TabManager {
 	private readonly window: BrowserWindow;
 	private readonly createView: (partition: string) => BrowserViewLike;
 	private readonly navigationHook?: TabNavigationHook;
+	private readonly onIncognitoPartitionEmpty?: (partition: string) => void;
+	private readonly defaultProfileId: string;
+	private readonly resolveProfilePartition?: (
+		profileId: string,
+	) => string | undefined;
 	private readonly tabs = new Map<string, Tab>();
 	private activeTabId?: string;
 	private readonly closedStack: ClosedTabRecord[] = [];
@@ -120,13 +168,19 @@ export class TabManager {
 		this.window = deps.window;
 		this.createView = deps.createView ?? defaultCreateView;
 		this.navigationHook = deps.navigationHook;
+		this.onIncognitoPartitionEmpty = deps.onIncognitoPartitionEmpty;
+		this.defaultProfileId = deps.defaultProfileId ?? "default";
+		this.resolveProfilePartition = deps.resolveProfilePartition;
 	}
 
 	/** Create a tab; by default it is activated (brought to foreground). */
 	create(url: string, opts: CreateTabOpts = {}): string {
 		if (this.destroyed) throw new Error("TabManager destroyed");
+		if (opts.incognito && opts.profileId) {
+			throw new Error("tab cannot be both incognito and bound to a profile");
+		}
 		const id = nanoid();
-		const partition = opts.partition ?? "persist:default";
+		const { partition, profileId, isIncognito } = this.resolvePartition(opts);
 		const view = this.createView(partition);
 		const tab: Tab = {
 			id,
@@ -138,6 +192,8 @@ export class TabManager {
 			partition,
 			pinned: false,
 			openedByAgent: opts.openedByAgent ?? false,
+			isIncognito,
+			profileId,
 			registry: new RefRegistry(),
 		};
 		this.wireEvents(tab);
@@ -150,6 +206,31 @@ export class TabManager {
 		return id;
 	}
 
+	private resolvePartition(opts: CreateTabOpts): {
+		partition: string;
+		profileId?: string;
+		isIncognito: boolean;
+	} {
+		if (opts.partition) {
+			const isIncognito = opts.partition.startsWith("incognito:");
+			return {
+				partition: opts.partition,
+				profileId: opts.profileId,
+				isIncognito,
+			};
+		}
+		if (opts.incognito) {
+			return {
+				partition: `incognito:${nanoid(8)}`,
+				isIncognito: true,
+			};
+		}
+		const profileId = opts.profileId ?? this.defaultProfileId;
+		const resolved = this.resolveProfilePartition?.(profileId);
+		const partition = resolved ?? "persist:default";
+		return { partition, profileId, isIncognito: false };
+	}
+
 	close(id: string): void {
 		const tab = this.tabs.get(id);
 		if (!tab) return;
@@ -157,6 +238,8 @@ export class TabManager {
 			url: tab.url,
 			partition: tab.partition,
 			openedByAgent: tab.openedByAgent,
+			isIncognito: tab.isIncognito,
+			profileId: tab.profileId,
 		});
 		if (this.closedStack.length > CLOSED_STACK_LIMIT) this.closedStack.shift();
 
@@ -178,11 +261,28 @@ export class TabManager {
 		}
 		this.tabs.delete(id);
 
+		// Incognito cleanup: if this was the last tab for its partition, ask host
+		// to clear the Electron session so cookies/localStorage don't linger.
+		if (tab.isIncognito && !this.partitionInUse(tab.partition)) {
+			try {
+				this.onIncognitoPartitionEmpty?.(tab.partition);
+			} catch (err) {
+				console.warn("[tab-manager] onIncognitoPartitionEmpty threw:", err);
+			}
+		}
+
 		// Promote another tab if any remain and none is active.
 		if (!this.activeTabId) {
 			const next = this.tabs.keys().next();
 			if (!next.done) this.focus(next.value);
 		}
+	}
+
+	private partitionInUse(partition: string): boolean {
+		for (const t of this.tabs.values()) {
+			if (t.partition === partition) return true;
+		}
+		return false;
 	}
 
 	focus(id: string): void {
@@ -211,6 +311,9 @@ export class TabManager {
 			active: t.id === this.activeTabId,
 			pinned: t.pinned,
 			openedByAgent: t.openedByAgent,
+			isIncognito: t.isIncognito,
+			profileId: t.profileId,
+			partition: t.partition,
 		}));
 	}
 
@@ -224,6 +327,7 @@ export class TabManager {
 		return this.create(rec.url, {
 			partition: rec.partition,
 			openedByAgent: rec.openedByAgent,
+			profileId: rec.profileId,
 		});
 	}
 
@@ -290,6 +394,28 @@ export class TabManager {
 		return this.tabs.get(id)?.registry;
 	}
 
+	/**
+	 * Return a minimal runner for the tab's main-world JS context, used by
+	 * reading-mode.extractArticle. Returns undefined when the tab is missing
+	 * or the injected BrowserViewLike doesn't expose executeJavaScript (mocks).
+	 */
+	getTabRunner(id: string):
+		| {
+				executeJavaScript(
+					code: string,
+					userGesture?: boolean,
+				): Promise<unknown>;
+		  }
+		| undefined {
+		const tab = this.tabs.get(id);
+		const exec = tab?.view.webContents.executeJavaScript;
+		if (!tab || !exec) return undefined;
+		return {
+			executeJavaScript: (code: string, userGesture?: boolean) =>
+				exec.call(tab.view.webContents, code, userGesture),
+		};
+	}
+
 	destroy(): void {
 		this.destroyed = true;
 		for (const tab of this.tabs.values()) {
@@ -337,7 +463,11 @@ export class TabManager {
 				/* ignore */
 			}
 			try {
-				this.navigationHook?.onNavigate?.(tab.id, tab.url, tab.title);
+				this.navigationHook?.onNavigate?.(tab.id, tab.url, tab.title, {
+					isIncognito: tab.isIncognito,
+					profileId: tab.profileId,
+					partition: tab.partition,
+				});
 			} catch (err) {
 				console.warn("[tab-manager] navigation hook threw:", err);
 			}

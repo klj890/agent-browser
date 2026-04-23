@@ -3,10 +3,13 @@ import { NavLink, Outlet } from "react-router-dom";
 const NAV = [
 	{ to: "/settings/admin", label: "Admin Policy" },
 	{ to: "/settings/personas", label: "Personas" },
+	{ to: "/settings/profiles", label: "Profiles" },
 	{ to: "/settings/history", label: "History" },
 	{ to: "/settings/bookmarks", label: "Bookmarks" },
 	{ to: "/settings/downloads", label: "Downloads" },
+	{ to: "/settings/extensions", label: "Extensions" },
 	{ to: "/settings/vault", label: "Auth Vault" },
+	{ to: "/settings/sync", label: "Cloud Sync" },
 	{ to: "/settings/trace", label: "Trace" },
 	{ to: "/settings/routines", label: "Routines" },
 ] as const;

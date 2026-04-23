@@ -11,19 +11,40 @@ import type { AuditEvent, AuditLog, TaskTraceSummary } from "./audit-log.js";
 import type { AuthVault } from "./auth-vault.js";
 import type { BookmarksStore } from "./bookmarks.js";
 import type { DownloadManager } from "./download.js";
+import type { ExtensionHost, InstalledExtension } from "./extension-host.js";
 import type { HistoryStore } from "./history.js";
 import type { Persona, PersonaManager } from "./persona-manager.js";
+import type { ProfileRecord, ProfileStore } from "./profile-store.js";
+import {
+	extractArticle,
+	type ReadingArticle,
+	ReadingExtractionError,
+} from "./reading-mode.js";
 import type { Routine, RoutinesEngine } from "./routines.js";
-import type { TabManager } from "./tab-manager.js";
+import type { SyncEngine } from "./sync-engine.js";
+import type { CreateTabOpts, TabManager } from "./tab-manager.js";
+
+function parseCreateTabOpts(raw: unknown): CreateTabOpts | undefined {
+	if (raw === undefined || raw === null) return undefined;
+	if (typeof raw !== "object") throw new Error("tab:open opts must be object");
+	const o = raw as Record<string, unknown>;
+	const out: CreateTabOpts = {};
+	if (typeof o.incognito === "boolean") out.incognito = o.incognito;
+	if (typeof o.profileId === "string") out.profileId = o.profileId;
+	if (typeof o.background === "boolean") out.background = o.background;
+	// partition / openedByAgent are internal — not exposed to renderer.
+	return out;
+}
 
 export function registerTabIpc(tm: TabManager): () => void {
 	const handlers: Array<[string, (...args: unknown[]) => unknown]> = [
 		[
 			"tab:open",
-			(_e, url: unknown) => {
+			(_e, url: unknown, opts: unknown) => {
 				if (typeof url !== "string")
 					throw new Error("tab:open needs string url");
-				return tm.create(url);
+				const parsed = parseCreateTabOpts(opts);
+				return tm.create(url, parsed);
 			},
 		],
 		[
@@ -257,6 +278,15 @@ export function registerHistoryIpc(store: HistoryStore): () => void {
 			},
 		],
 		[
+			"history:fullTextSearch",
+			(_e, q: unknown, limit: unknown) => {
+				if (typeof q !== "string")
+					throw new Error("history:fullTextSearch needs string q");
+				const l = typeof limit === "number" ? limit : 50;
+				return store.fullTextSearch(q, l);
+			},
+		],
+		[
 			"history:semanticSearch",
 			async (_e, q: unknown, limit: unknown) => {
 				if (typeof q !== "string")
@@ -357,6 +387,214 @@ export function registerDownloadsIpc(dm: DownloadManager): () => void {
 	};
 }
 
+// ---------------------------------------------------------------------------
+// Sync IPC (P1 Stage 16)
+// ---------------------------------------------------------------------------
+
+export function registerSyncIpc(engine: SyncEngine): () => void {
+	const handlers: Array<[string, (...args: unknown[]) => unknown]> = [
+		["sync:status", () => engine.status()],
+		[
+			"sync:configure",
+			async (_e, passphrase: unknown, serverUrl: unknown) => {
+				if (typeof passphrase !== "string")
+					throw new Error("sync:configure needs string passphrase");
+				const url = typeof serverUrl === "string" ? serverUrl : undefined;
+				await engine.configure(passphrase, url);
+				return engine.status();
+			},
+		],
+		[
+			"sync:unlock",
+			async (_e, passphrase: unknown) => {
+				if (typeof passphrase !== "string")
+					throw new Error("sync:unlock needs string passphrase");
+				const ok = await engine.unlock(passphrase);
+				return { ok, status: engine.status() };
+			},
+		],
+		[
+			"sync:lock",
+			() => {
+				engine.lock();
+				return engine.status();
+			},
+		],
+		[
+			"sync:disable",
+			() => {
+				engine.disable();
+				return engine.status();
+			},
+		],
+		["sync:pushNow", async () => engine.pushNow()],
+		["sync:pullNow", async () => engine.pullNow()],
+	];
+	for (const [ch, fn] of handlers) ipcMain.handle(ch, fn);
+	return () => {
+		for (const [ch] of handlers) ipcMain.removeHandler(ch);
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Extensions IPC (P1 Stage 15)
+// ---------------------------------------------------------------------------
+
+export interface ExtensionsIpcDeps {
+	host: ExtensionHost;
+	/** Opens a system folder picker. Injected by index.ts using Electron dialog. */
+	pickFolder?: () => Promise<string | null>;
+}
+
+function summarizeExt(e: InstalledExtension) {
+	return {
+		id: e.id,
+		name: e.name,
+		version: e.version,
+		path: e.path,
+		enabled: e.enabled,
+		manifestVersion: e.manifestVersion,
+	};
+}
+
+export function registerExtensionsIpc(deps: ExtensionsIpcDeps): () => void {
+	const handlers: Array<[string, (...args: unknown[]) => unknown]> = [
+		["extensions:list", () => deps.host.list().map(summarizeExt)],
+		[
+			"extensions:install",
+			async (_e, folder: unknown) => {
+				let p: string | null = null;
+				if (typeof folder === "string" && folder.length > 0) {
+					p = folder;
+				} else if (deps.pickFolder) {
+					p = await deps.pickFolder();
+				}
+				if (!p) return null;
+				return summarizeExt(await deps.host.install(p));
+			},
+		],
+		[
+			"extensions:remove",
+			(_e, id: unknown) => {
+				if (typeof id !== "string")
+					throw new Error("extensions:remove needs string id");
+				return deps.host.remove(id);
+			},
+		],
+		[
+			"extensions:setEnabled",
+			async (_e, id: unknown, enabled: unknown) => {
+				if (typeof id !== "string" || typeof enabled !== "boolean") {
+					throw new Error("extensions:setEnabled needs (id, enabled)");
+				}
+				return summarizeExt(await deps.host.setEnabled(id, enabled));
+			},
+		],
+	];
+	for (const [ch, fn] of handlers) ipcMain.handle(ch, fn);
+	return () => {
+		for (const [ch] of handlers) ipcMain.removeHandler(ch);
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Reading-mode IPC (P1 Stage 13)
+// ---------------------------------------------------------------------------
+
+export function registerReadingIpc(tm: TabManager): () => void {
+	const channel = "reading:extract";
+	ipcMain.handle(channel, async (_e, tabId: unknown) => {
+		if (typeof tabId !== "string") {
+			throw new Error("reading:extract needs string tabId");
+		}
+		const runner = tm.getTabRunner(tabId);
+		if (!runner) {
+			return null;
+		}
+		try {
+			const article: ReadingArticle | null = await extractArticle(runner);
+			return article;
+		} catch (err) {
+			// Surface as plain Error so the renderer sees a helpful message.
+			if (err instanceof ReadingExtractionError) {
+				throw new Error(err.message);
+			}
+			throw err;
+		}
+	});
+	return () => ipcMain.removeHandler(channel);
+}
+
+// ---------------------------------------------------------------------------
+// Profiles IPC (P1 Stage 12)
+// ---------------------------------------------------------------------------
+
+export interface ProfilesIpcDeps {
+	onProfileRemoved?: (partition: string) => void;
+}
+
+function summarizeProfile(p: ProfileRecord): {
+	id: string;
+	name: string;
+	partition: string;
+	createdAt: number;
+	removable: boolean;
+} {
+	return {
+		id: p.id,
+		name: p.name,
+		partition: p.partition,
+		createdAt: p.createdAt,
+		removable: p.id !== "default",
+	};
+}
+
+export function registerProfilesIpc(
+	store: ProfileStore,
+	deps: ProfilesIpcDeps = {},
+): () => void {
+	const handlers: Array<[string, (...args: unknown[]) => unknown]> = [
+		["profiles:list", () => store.list().map(summarizeProfile)],
+		[
+			"profiles:create",
+			(_e, name: unknown) => {
+				if (typeof name !== "string")
+					throw new Error("profiles:create needs string name");
+				return summarizeProfile(store.create(name));
+			},
+		],
+		[
+			"profiles:rename",
+			(_e, id: unknown, name: unknown) => {
+				if (typeof id !== "string" || typeof name !== "string")
+					throw new Error("profiles:rename needs (id, name)");
+				return summarizeProfile(store.rename(id, name));
+			},
+		],
+		[
+			"profiles:remove",
+			(_e, id: unknown) => {
+				if (typeof id !== "string")
+					throw new Error("profiles:remove needs string id");
+				const existing = store.getById(id);
+				if (!existing) return false;
+				const removed = store.remove(id);
+				if (removed) {
+					try {
+						deps.onProfileRemoved?.(existing.partition);
+					} catch (err) {
+						console.warn("[profiles] onProfileRemoved threw:", err);
+					}
+				}
+				return removed;
+			},
+		],
+	];
+	for (const [ch, fn] of handlers) ipcMain.handle(ch, fn);
+	return () => {
+		for (const [ch] of handlers) ipcMain.removeHandler(ch);
+	};
+}
 
 export function registerPersonaIpc(deps: PersonaIpcDeps): () => void {
 	const handlers: Array<[string, (...args: unknown[]) => unknown]> = [

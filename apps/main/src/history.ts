@@ -18,6 +18,31 @@ export interface HistoryEntry {
 	visited_at: number;
 }
 
+/**
+ * Escape a single token for inclusion in an FTS5 MATCH expression.
+ * Any double-quote becomes two double-quotes (FTS5 string-literal quoting);
+ * the whole token is then wrapped in double-quotes and given a `*` suffix
+ * so partial words still match.
+ */
+function escapeFtsToken(tok: string): string {
+	// Drop characters FTS5 treats as operators (colon → column spec, paren →
+	// subexpression). Trimming them is fine for a search UI.
+	const cleaned = tok.replace(/[():]/g, "");
+	if (!cleaned) return "";
+	return `"${cleaned.replace(/"/g, '""')}"*`;
+}
+
+export function toFtsMatch(q: string): string {
+	const parts = q
+		.split(/\s+/)
+		.map((s) => s.trim())
+		.filter(Boolean)
+		.map(escapeFtsToken)
+		.filter(Boolean);
+	if (parts.length === 0) return "";
+	return parts.join(" ");
+}
+
 export class HistoryStore {
 	private readonly insertStmt: import("better-sqlite3").Statement<
 		[string, string, number]
@@ -27,6 +52,9 @@ export class HistoryStore {
 	>;
 	private readonly searchStmt: import("better-sqlite3").Statement<
 		[string, string, number]
+	>;
+	private readonly ftsStmt: import("better-sqlite3").Statement<
+		[string, number]
 	>;
 	private readonly clearStmt: import("better-sqlite3").Statement;
 	private readonly getByIdsStmt: import("better-sqlite3").Statement;
@@ -43,6 +71,16 @@ export class HistoryStore {
 		);
 		this.searchStmt = db.prepare(
 			"SELECT id, url, title, visited_at FROM history WHERE url LIKE ? OR title LIKE ? ORDER BY visited_at DESC LIMIT ?",
+		);
+		// FTS5 MATCH: ranked by bm25 (lower = more relevant). We join back to
+		// history by rowid to hydrate the real row.
+		this.ftsStmt = db.prepare(
+			`SELECT h.id, h.url, h.title, h.visited_at
+			 FROM history_fts f
+			 JOIN history h ON h.id = f.rowid
+			 WHERE history_fts MATCH ?
+			 ORDER BY bm25(history_fts), h.visited_at DESC
+			 LIMIT ?`,
 		);
 		this.clearStmt = db.prepare("DELETE FROM history");
 		this.getByIdsStmt = db.prepare(
@@ -96,6 +134,25 @@ export class HistoryStore {
 	search(q: string, limit = 50): HistoryEntry[] {
 		const pat = `%${q.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
 		return this.searchStmt.all(pat, pat, limit) as HistoryEntry[];
+	}
+
+	/**
+	 * Full-text search backed by an FTS5 virtual table. The query is rewritten
+	 * into a safe MATCH expression: each whitespace-separated token becomes a
+	 * prefix match, letting the user type partial words. Special FTS operators
+	 * (AND/OR/NOT/NEAR/column specifiers/quotes) are escaped to avoid
+	 * accidental syntax errors on user input.
+	 */
+	fullTextSearch(q: string, limit = 50): HistoryEntry[] {
+		const match = toFtsMatch(q);
+		if (!match) return [];
+		try {
+			return this.ftsStmt.all(match, limit) as HistoryEntry[];
+		} catch {
+			// A malformed MATCH expression (e.g. user typed stray `"`) — treat
+			// as no results rather than crashing the IPC channel.
+			return [];
+		}
 	}
 
 	/**

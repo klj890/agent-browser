@@ -11,7 +11,10 @@ contextBridge.exposeInMainWorld("agentBrowser", {
 		},
 	},
 	tab: {
-		open: (url: string) => ipcRenderer.invoke("tab:open", url),
+		open: (
+			url: string,
+			opts?: { incognito?: boolean; profileId?: string; background?: boolean },
+		) => ipcRenderer.invoke("tab:open", url, opts),
 		close: (id: string) => ipcRenderer.invoke("tab:close", id),
 		focus: (id: string) => ipcRenderer.invoke("tab:focus", id),
 		list: () => ipcRenderer.invoke("tab:list"),
@@ -22,6 +25,35 @@ contextBridge.exposeInMainWorld("agentBrowser", {
 		reload: (id: string) => ipcRenderer.invoke("tab:reload", id),
 		undoClose: () => ipcRenderer.invoke("tab:undoClose"),
 		snapshotCurrent: () => ipcRenderer.invoke("tab:snapshotCurrent"),
+	},
+	profiles: {
+		list: () => ipcRenderer.invoke("profiles:list"),
+		create: (name: string) => ipcRenderer.invoke("profiles:create", name),
+		rename: (id: string, name: string) =>
+			ipcRenderer.invoke("profiles:rename", id, name),
+		remove: (id: string) => ipcRenderer.invoke("profiles:remove", id),
+	},
+	reading: {
+		extract: (tabId: string) => ipcRenderer.invoke("reading:extract", tabId),
+	},
+	extensions: {
+		list: () => ipcRenderer.invoke("extensions:list"),
+		install: (folder?: string) =>
+			ipcRenderer.invoke("extensions:install", folder),
+		remove: (id: string) => ipcRenderer.invoke("extensions:remove", id),
+		setEnabled: (id: string, enabled: boolean) =>
+			ipcRenderer.invoke("extensions:setEnabled", id, enabled),
+	},
+	sync: {
+		status: () => ipcRenderer.invoke("sync:status"),
+		configure: (passphrase: string, serverUrl?: string) =>
+			ipcRenderer.invoke("sync:configure", passphrase, serverUrl),
+		unlock: (passphrase: string) =>
+			ipcRenderer.invoke("sync:unlock", passphrase),
+		lock: () => ipcRenderer.invoke("sync:lock"),
+		disable: () => ipcRenderer.invoke("sync:disable"),
+		pushNow: () => ipcRenderer.invoke("sync:pushNow"),
+		pullNow: () => ipcRenderer.invoke("sync:pullNow"),
 	},
 	policy: {
 		get: () => ipcRenderer.invoke("policy:get"),
@@ -41,8 +73,7 @@ contextBridge.exposeInMainWorld("agentBrowser", {
 		clear: () => ipcRenderer.invoke("vault:clear"),
 	},
 	trace: {
-		listTasks: (limit?: number) =>
-			ipcRenderer.invoke("trace:listTasks", limit),
+		listTasks: (limit?: number) => ipcRenderer.invoke("trace:listTasks", limit),
 		getTaskEvents: (taskId: string) =>
 			ipcRenderer.invoke("trace:getTaskEvents", taskId),
 		clear: () => ipcRenderer.invoke("trace:clear"),
@@ -63,6 +94,8 @@ contextBridge.exposeInMainWorld("agentBrowser", {
 			ipcRenderer.invoke("history:list", limit, offset),
 		search: (q: string, limit?: number) =>
 			ipcRenderer.invoke("history:search", q, limit),
+		fullTextSearch: (q: string, limit?: number) =>
+			ipcRenderer.invoke("history:fullTextSearch", q, limit),
 		semanticSearch: (q: string, limit?: number) =>
 			ipcRenderer.invoke("history:semanticSearch", q, limit),
 		clear: () => ipcRenderer.invoke("history:clear"),

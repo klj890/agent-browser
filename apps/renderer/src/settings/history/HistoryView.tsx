@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 import type { HistoryEntryView } from "../../types/preload";
 
+type SearchMode = "like" | "fulltext" | "semantic";
+
 export function HistoryView() {
 	const [entries, setEntries] = useState<HistoryEntryView[]>([]);
 	const [query, setQuery] = useState("");
-	const [semantic, setSemantic] = useState(false);
+	const [mode, setMode] = useState<SearchMode>("fulltext");
 	const [error, setError] = useState<string | null>(null);
 	const [available, setAvailable] = useState(true);
 
-	const load = useCallback(async (q: string, useSemantic: boolean) => {
+	const load = useCallback(async (q: string, m: SearchMode) => {
 		const bridge = window.agentBrowser?.history;
 		if (!bridge) {
 			setAvailable(false);
@@ -18,8 +20,10 @@ export function HistoryView() {
 			let list: HistoryEntryView[];
 			if (!q) {
 				list = await bridge.list();
-			} else if (useSemantic) {
+			} else if (m === "semantic") {
 				list = await bridge.semanticSearch(q);
+			} else if (m === "fulltext") {
+				list = await bridge.fullTextSearch(q);
 			} else {
 				list = await bridge.search(q);
 			}
@@ -31,12 +35,12 @@ export function HistoryView() {
 	}, []);
 
 	useEffect(() => {
-		void load("", false);
+		void load("", "fulltext");
 	}, [load]);
 
 	const onSearch = (e: React.FormEvent) => {
 		e.preventDefault();
-		void load(query, semantic);
+		void load(query, mode);
 	};
 
 	const onClear = async () => {
@@ -44,7 +48,7 @@ export function HistoryView() {
 		if (!bridge) return;
 		if (!confirm("Clear all history?")) return;
 		await bridge.clear();
-		void load(query, semantic);
+		void load(query, mode);
 	};
 
 	if (!available) {
@@ -55,6 +59,13 @@ export function HistoryView() {
 			</section>
 		);
 	}
+
+	const placeholder =
+		mode === "semantic"
+			? "Semantic search…"
+			: mode === "fulltext"
+				? "Full-text search (multi-word, prefix match)…"
+				: "Substring search URL or title…";
 
 	return (
 		<section className="settings-view">
@@ -68,26 +79,24 @@ export function HistoryView() {
 				<input
 					value={query}
 					onChange={(e) => setQuery(e.target.value)}
-					placeholder={
-						semantic ? "Semantic search…" : "Search URL or title…"
-					}
+					placeholder={placeholder}
 				/>
 				<button type="submit">Search</button>
-				<label
+				<select
+					value={mode}
+					onChange={(e) => setMode(e.target.value as SearchMode)}
 					style={{
 						marginLeft: 8,
-						display: "inline-flex",
-						alignItems: "center",
-						gap: 4,
+						padding: "4px 6px",
+						borderRadius: 4,
+						border: "1px solid #ccc",
+						fontSize: 12,
 					}}
 				>
-					<input
-						type="checkbox"
-						checked={semantic}
-						onChange={(e) => setSemantic(e.target.checked)}
-					/>
-					Semantic
-				</label>
+					<option value="fulltext">Full-text</option>
+					<option value="like">Substring</option>
+					<option value="semantic">Semantic</option>
+				</select>
 			</form>
 			{error && (
 				<p role="alert" className="settings-error">

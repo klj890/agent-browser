@@ -11,6 +11,47 @@ export interface TabSummary {
 	active: boolean;
 	pinned: boolean;
 	openedByAgent: boolean;
+	isIncognito: boolean;
+	profileId?: string;
+	partition: string;
+}
+
+export interface ProfileView {
+	id: string;
+	name: string;
+	partition: string;
+	createdAt: number;
+	removable: boolean;
+}
+
+export interface SyncStatusView {
+	configured: boolean;
+	unlocked: boolean;
+	enabled: boolean;
+	lastBookmarksCursor: number;
+	lastHistoryCursor: number;
+	serverUrl: string | null;
+}
+
+export interface ExtensionView {
+	id: string;
+	name: string;
+	version: string;
+	path: string;
+	enabled: boolean;
+	manifestVersion: number;
+}
+
+export interface ReadingArticleView {
+	title: string | null;
+	byline: string | null;
+	siteName: string | null;
+	excerpt: string | null;
+	contentHtml: string | null;
+	textContent: string | null;
+	length: number | null;
+	lang: string | null;
+	dir: string | null;
 }
 
 export interface AdminPolicyView {
@@ -211,7 +252,14 @@ export interface AgentBrowserBridge {
 		onStream: (cb: (chunk: AgentStreamChunk) => void) => () => void;
 	};
 	tab: {
-		open: (url: string) => Promise<string>;
+		open: (
+			url: string,
+			opts?: {
+				incognito?: boolean;
+				profileId?: string;
+				background?: boolean;
+			},
+		) => Promise<string>;
 		close: (id: string) => Promise<boolean>;
 		focus: (id: string) => Promise<boolean>;
 		list: () => Promise<TabSummary[]>;
@@ -221,6 +269,35 @@ export interface AgentBrowserBridge {
 		reload: (id: string) => Promise<boolean>;
 		undoClose: () => Promise<string | null>;
 		snapshotCurrent: () => Promise<string | null>;
+	};
+	profiles: {
+		list: () => Promise<ProfileView[]>;
+		create: (name: string) => Promise<ProfileView>;
+		rename: (id: string, name: string) => Promise<ProfileView>;
+		remove: (id: string) => Promise<boolean>;
+	};
+	reading: {
+		extract: (tabId: string) => Promise<ReadingArticleView | null>;
+	};
+	extensions: {
+		list: () => Promise<ExtensionView[]>;
+		install: (folder?: string) => Promise<ExtensionView | null>;
+		remove: (id: string) => Promise<boolean>;
+		setEnabled: (id: string, enabled: boolean) => Promise<ExtensionView>;
+	};
+	sync: {
+		status: () => Promise<SyncStatusView>;
+		configure: (
+			passphrase: string,
+			serverUrl?: string,
+		) => Promise<SyncStatusView>;
+		unlock: (
+			passphrase: string,
+		) => Promise<{ ok: boolean; status: SyncStatusView }>;
+		lock: () => Promise<SyncStatusView>;
+		disable: () => Promise<SyncStatusView>;
+		pushNow: () => Promise<{ pushed: number }>;
+		pullNow: () => Promise<{ applied: number; skipped: number }>;
 	};
 	policy: {
 		get: () => Promise<AdminPolicyView>;
@@ -264,20 +341,15 @@ export interface AgentBrowserBridge {
 	routines: {
 		list: () => Promise<RoutineStatusView[]>;
 		create: (routine: RoutineInput) => Promise<RoutineStatusView>;
-		update: (
-			name: string,
-			routine: RoutineInput,
-		) => Promise<RoutineStatusView>;
+		update: (name: string, routine: RoutineInput) => Promise<RoutineStatusView>;
 		delete: (name: string) => Promise<boolean>;
-		enable: (
-			name: string,
-			enabled: boolean,
-		) => Promise<RoutineStatusView>;
+		enable: (name: string, enabled: boolean) => Promise<RoutineStatusView>;
 		runNow: (name: string) => Promise<boolean>;
 	};
 	history: {
 		list: (limit?: number, offset?: number) => Promise<HistoryEntryView[]>;
 		search: (q: string, limit?: number) => Promise<HistoryEntryView[]>;
+		fullTextSearch: (q: string, limit?: number) => Promise<HistoryEntryView[]>;
 		semanticSearch: (q: string, limit?: number) => Promise<HistoryEntryView[]>;
 		clear: () => Promise<boolean>;
 	};

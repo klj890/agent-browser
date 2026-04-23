@@ -18,31 +18,40 @@ import type { AgentHost, StreamChunk } from "./agent-host.js";
 import { createAgentHostForTab } from "./agent-host-factory.js";
 import { AuditLog } from "./audit-log.js";
 import { AuthVault } from "./auth-vault.js";
-import { BookmarksStore } from "./bookmarks.js"
+import { BookmarksStore } from "./bookmarks.js";
 import { ConfirmationHandler } from "./confirmation.js";
 import { DownloadManager } from "./download.js";
 import { registerEmergencyStop } from "./emergency-stop.js";
+import { ExtensionHost, type ExtensionSessionLike } from "./extension-host.js";
 import { HistoryStore } from "./history.js";
 import { HistoryIndex } from "./history-index.js";
-import { createRedactionPipelineFromPolicy } from "./redaction-pipeline.js";
 import {
 	type AgentOrchestrator,
 	registerAgentIpc,
 	registerBookmarksIpc,
 	registerDownloadsIpc,
+	registerExtensionsIpc,
 	registerHistoryIpc,
 	registerPersonaIpc,
 	registerPolicyIpc,
+	registerProfilesIpc,
+	registerReadingIpc,
 	registerRoutinesIpc,
+	registerSyncIpc,
 	registerTabIpc,
 	registerTraceIpc,
 	registerVaultIpc,
 } from "./ipc.js";
-import { RoutinesEngine } from "./routines.js";
 import { PersonaManager } from "./persona-manager.js";
 import { syncPersonasOnce } from "./persona-sync.js";
+import { ProfileStore } from "./profile-store.js";
+import { createRedactionPipelineFromPolicy } from "./redaction-pipeline.js";
+import { RoutinesEngine } from "./routines.js";
 import { createDefaultSlashRegistry } from "./slash-commands.js";
 import { getAppDatabase } from "./storage/sqlite.js";
+import { SyncConfigStore } from "./sync-config.js";
+import { SyncEngine } from "./sync-engine.js";
+import { HttpSyncTransport, NoopSyncTransport } from "./sync-transport-http.js";
 import type { TabManager as TabManagerType } from "./tab-manager.js";
 import { TabManager } from "./tab-manager.js";
 import { TaskStateStore } from "./task-state.js";
@@ -294,7 +303,7 @@ async function createMainWindow(
 		await win.loadFile(path.join(__dirname, "../../renderer/dist/index.html"));
 	}
 
-	// Persistent stores (Stage 1.5 / 1.6).
+	// Persistent stores (Stage 1.5 / 1.6 / P1-12).
 	const userDataDir = app.getPath("userData");
 	const appDb = getAppDatabase(
 		path.join(userDataDir, "agent-browser", "app.sqlite"),
@@ -309,6 +318,7 @@ async function createMainWindow(
 	);
 	historyStore.attachIndex(historyIndex, historyRedactor);
 	const bookmarksStore = new BookmarksStore(appDb);
+	const profileStore = new ProfileStore(appDb);
 	const unregisterHistory = registerHistoryIpc(historyStore);
 	const unregisterBookmarks = registerBookmarksIpc(bookmarksStore);
 
@@ -321,14 +331,30 @@ async function createMainWindow(
 
 	const tm = new TabManager({
 		window: win,
+		defaultProfileId: "default",
+		resolveProfilePartition: (profileId) =>
+			profileStore.getById(profileId)?.partition,
+		onIncognitoPartitionEmpty: (partition) => {
+			// Purge in-memory storage when the last incognito tab of a session closes.
+			void session
+				.fromPartition(partition)
+				.clearStorageData()
+				.catch((err) =>
+					console.warn("[incognito] clearStorageData failed:", err),
+				);
+		},
 		navigationHook: {
-			onNavigate: (_tabId, url, title) => {
-				try {
-					historyStore.recordWithIndex(url, title);
-				} catch (err) {
-					console.warn("[history] record failed:", err);
+			onNavigate: (_tabId, url, title, ctx) => {
+				// Incognito tabs never touch the persistent history / embedding index
+				// — that would defeat the point. Persona auto-switch still fires since
+				// it's purely in-memory and session-scoped.
+				if (!ctx.isIncognito) {
+					try {
+						historyStore.recordWithIndex(url, title);
+					} catch (err) {
+						console.warn("[history] record failed:", err);
+					}
 				}
-				// Auto-switch persona by domain (Stage 4.7).
 				try {
 					const match = personaManager.matchByDomain(url);
 					if (match) {
@@ -342,6 +368,71 @@ async function createMainWindow(
 		},
 	});
 	const unregisterTab = registerTabIpc(tm);
+	const unregisterReading = registerReadingIpc(tm);
+
+	// Extensions (Stage 15). Loaded into the default session so installed
+	// Chrome MV3 extensions see the main persistent profile. Incognito partitions
+	// deliberately skip extension loading.
+	const extSession = session.defaultSession as unknown as ExtensionSessionLike;
+	const extensionHost = new ExtensionHost({
+		storePath: path.join(userDataDir, "agent-browser", "extensions.json"),
+		session: extSession,
+		getPolicy: () => policy.get().extension,
+	});
+	void extensionHost.loadEnabledAll().then((r) => {
+		if (r.failed.length > 0 || r.blockedByPolicy.length > 0) {
+			console.warn(
+				"[extensions] boot load report:",
+				JSON.stringify(r, null, 2),
+			);
+		}
+	});
+	const unregisterExtensions = registerExtensionsIpc({
+		host: extensionHost,
+		pickFolder: async () => {
+			const r = await dialog.showOpenDialog(win, {
+				properties: ["openDirectory"],
+				title: "Load unpacked extension folder",
+			});
+			if (r.canceled || r.filePaths.length === 0) return null;
+			return r.filePaths[0] ?? null;
+		},
+	});
+
+	// E2E sync (Stage 16). Passphrase-derived key lives only in engine memory.
+	const syncConfigStore = new SyncConfigStore(
+		path.join(userDataDir, "agent-browser", "sync-config.json"),
+	);
+	const syncCfgSnapshot = syncConfigStore.load();
+	const syncTransport = syncCfgSnapshot.serverUrl
+		? new HttpSyncTransport({
+				baseUrl: syncCfgSnapshot.serverUrl,
+				// Reuse an existing persona auth token if stored under this vault key.
+				getAuthToken: () => null,
+			})
+		: new NoopSyncTransport();
+	const syncEngine = new SyncEngine({
+		configStore: syncConfigStore,
+		bookmarks: bookmarksStore,
+		history: historyStore,
+		transport: syncTransport,
+	});
+	const unregisterSync = registerSyncIpc(syncEngine);
+
+	const unregisterProfiles = registerProfilesIpc(profileStore, {
+		onProfileRemoved: (partition) => {
+			// Close any tabs still using the removed partition, then purge the session.
+			for (const t of tm.list()) {
+				if (t.partition === partition) tm.close(t.id);
+			}
+			void session
+				.fromPartition(partition)
+				.clearStorageData()
+				.catch((err) =>
+					console.warn("[profiles] clearStorageData failed:", err),
+				);
+		},
+	});
 	tm.create("https://example.com");
 	win.on("resize", () => tm.handleResize());
 
@@ -435,6 +526,11 @@ async function createMainWindow(
 		unregisterHistory();
 		unregisterBookmarks();
 		unregisterDownloads();
+		unregisterProfiles();
+		unregisterReading();
+		unregisterExtensions();
+		unregisterSync();
+		syncEngine.lock();
 		ipcMain.removeHandler("tab:snapshotCurrent");
 		tm.destroy();
 	});
