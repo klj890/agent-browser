@@ -41,6 +41,9 @@ importers:
       '@agent-browser/browser-tools':
         specifier: workspace:*
         version: link:../../packages/browser-tools
+      '@mozilla/readability':
+        specifier: ^0.6.0
+        version: 0.6.0
       '@xenova/transformers':
         specifier: ^2.17.2
         version: 2.17.2
@@ -622,6 +625,10 @@ packages:
   '@malept/flatpak-bundler@0.4.0':
     resolution: {integrity: sha512-9QOtNffcOF/c1seMCDnjckb3R9WHcG34tky+FHpNKKCW0wc/scYLwMtO+ptyGUfMW0/b/n4qRiALlaFHc9Oj7Q==}
     engines: {node: '>= 10.0.0'}
+
+  '@mozilla/readability@0.6.0':
+    resolution: {integrity: sha512-juG5VWh4qAivzTAeMzvY9xs9HY5rAcr2E4I7tiSSCokRFi7XIZCAu92ZkSTsIj1OPceCifL3cpfteP3pDT9/QQ==}
+    engines: {node: '>=14.0.0'}
 
   '@npmcli/fs@2.1.2':
     resolution: {integrity: sha512-yOJKRvohFOaLqipNtwYB9WugyZKhC/DZC4VYPmpaCzDBrA8YpK3qHZ8/HGscMnE4GqbkLNuVcCnxkeQEdGt6LQ==}
@@ -3044,6 +3051,8 @@ snapshots:
       tmp-promise: 3.0.3
     transitivePeerDependencies:
       - supports-color
+
+  '@mozilla/readability@0.6.0': {}
 
   '@npmcli/fs@2.1.2':
     dependencies:
