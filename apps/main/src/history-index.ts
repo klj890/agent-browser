@@ -77,8 +77,20 @@ function vecToBuffer(vec: Float32Array): Buffer {
 }
 
 function bufferToVec(buf: Buffer, dim: number): Float32Array {
-	const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-	const f = new Float32Array(ab);
+	// Fast path: when the buffer is Float32-aligned, build a view directly
+	// over the underlying ArrayBuffer — no copy. In search hot loops over
+	// thousands of rows this is materially cheaper than slice() each time.
+	// Fallback: only copy when alignment makes the view impossible.
+	let f: Float32Array;
+	if (buf.byteOffset % 4 === 0) {
+		f = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+	} else {
+		const ab = buf.buffer.slice(
+			buf.byteOffset,
+			buf.byteOffset + buf.byteLength,
+		);
+		f = new Float32Array(ab);
+	}
 	if (f.length !== dim) {
 		// Tolerate mismatch by trimming / padding.
 		const trimmed = new Float32Array(dim);
