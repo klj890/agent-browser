@@ -111,7 +111,7 @@ async function initPersonaManager(): Promise<PersonaManager> {
  * while a task runs are queued behind the current one via simple serialisation.
  * Multi-tab concurrency is a Stage 4+ concern.
  */
-function createOrchestrator(deps: {
+interface OrchestratorDeps {
 	tabManager: TabManager;
 	policy: PolicyProvider;
 	personaManager: PersonaManager;
@@ -121,102 +121,125 @@ function createOrchestrator(deps: {
 	confirmation: ConfirmationHandler;
 	taskStore: TaskStateStore;
 	vault: AuthVault;
-}): AgentOrchestrator {
-	let activeHost: AgentHost | undefined;
-	let activeTaskId: string | undefined;
-	return {
-		async startTask(prompt: string, target: (chunk: StreamChunk) => void) {
-			const tabId = deps.tabManager.getActiveId();
-			if (!tabId) throw new Error("no active tab");
-			const slug = deps.getActiveSlug();
-			const persona = slug ? deps.personaManager.getBySlug(slug) : undefined;
-			const first = deps.personaManager.list()[0];
-			const use = persona ?? first;
-			if (!use) throw new Error("no persona registered");
-			const host = await createAgentHostForTab(
-				{
-					tabManager: deps.tabManager,
-					policy: deps.policy.get(),
-					personaManager: deps.personaManager,
-					auditLog: deps.auditLog,
-					toolResultStorage: deps.toolResultStorage,
-					confirmation: deps.confirmation,
-					taskStore: deps.taskStore,
-					vault: deps.vault,
-				},
-				{ tabId, persona: use },
-			);
-			activeHost = host;
-			const task = deps.taskStore.create({
-				prompt,
-				persona: use.slug,
-				tabId,
+}
+
+/**
+ * Run one Agent task start-to-end against the currently active tab.
+ * Returns the TaskId; drives the stream on its own. When `trackActive` is
+ * non-null the caller's {host,taskId} slot receives the live values so
+ * UI concerns (cancel / getHost) work — for background routines the slot
+ * stays null and the task runs in isolation without clobbering any
+ * user-initiated session.
+ */
+async function runOneTask(
+	deps: OrchestratorDeps,
+	prompt: string,
+	target: (chunk: StreamChunk) => void,
+	trackActive: { host?: AgentHost; taskId?: string } | null,
+): Promise<string> {
+	const tabId = deps.tabManager.getActiveId();
+	if (!tabId) throw new Error("no active tab");
+	const slug = deps.getActiveSlug();
+	const persona = slug ? deps.personaManager.getBySlug(slug) : undefined;
+	const first = deps.personaManager.list()[0];
+	const use = persona ?? first;
+	if (!use) throw new Error("no persona registered");
+	const host = await createAgentHostForTab(
+		{
+			tabManager: deps.tabManager,
+			policy: deps.policy.get(),
+			personaManager: deps.personaManager,
+			auditLog: deps.auditLog,
+			toolResultStorage: deps.toolResultStorage,
+			confirmation: deps.confirmation,
+			taskStore: deps.taskStore,
+			vault: deps.vault,
+		},
+		{ tabId, persona: use },
+	);
+	if (trackActive) trackActive.host = host;
+	const task = deps.taskStore.create({
+		prompt,
+		persona: use.slug,
+		tabId,
+	});
+	const taskId = task.id;
+	if (trackActive) trackActive.taskId = taskId;
+	void deps.auditLog.append({
+		event: "task.start",
+		ts: Date.now(),
+		task_id: taskId,
+		user_prompt_hash: String(prompt.length),
+		persona: use.slug,
+		tab_url: deps.tabManager.list().find((t) => t.id === tabId)?.url ?? "",
+	});
+	deps.taskStore.transition(taskId, "running");
+	void (async () => {
+		let endReason: "completed" | "failed" | "killed" | "budget_exceeded" =
+			"completed";
+		try {
+			for await (const chunk of host.run(prompt, task.abortController.signal)) {
+				target(chunk);
+				if (chunk.type === "done") endReason = chunk.reason;
+			}
+		} catch (err) {
+			endReason = "failed";
+			target({
+				type: "error",
+				message: err instanceof Error ? err.message : String(err),
+				reason: "failed",
 			});
-			const taskId = task.id;
-			activeTaskId = taskId;
+			target({ type: "done", reason: "failed" });
+		} finally {
+			try {
+				deps.taskStore.transition(taskId, endReason);
+			} catch {
+				// already terminal
+			}
+			const finalTask = deps.taskStore.get(taskId);
+			const endStatus: "completed" | "failed" | "killed" | "budget_exceeded" =
+				finalTask.status === "pending" || finalTask.status === "running"
+					? "failed"
+					: finalTask.status;
 			void deps.auditLog.append({
-				event: "task.start",
+				event: "task.end",
 				ts: Date.now(),
 				task_id: taskId,
-				user_prompt_hash: String(prompt.length),
-				persona: use.slug,
-				tab_url: deps.tabManager.list().find((t) => t.id === tabId)?.url ?? "",
+				status: endStatus,
+				steps: finalTask.step ?? 0,
+				total_usd: finalTask.totalUsd ?? 0,
+				total_tokens: finalTask.totalTokens ?? 0,
 			});
-			deps.taskStore.transition(taskId, "running");
-			// Drive the stream in background; caller returns immediately with taskId.
-			void (async () => {
-				let endReason: "completed" | "failed" | "killed" | "budget_exceeded" =
-					"completed";
-				try {
-					for await (const chunk of host.run(
-						prompt,
-						task.abortController.signal,
-					)) {
-						target(chunk);
-						if (chunk.type === "done") endReason = chunk.reason;
-					}
-				} catch (err) {
-					endReason = "failed";
-					target({
-						type: "error",
-						message: err instanceof Error ? err.message : String(err),
-						reason: "failed",
-					});
-					target({ type: "done", reason: "failed" });
-				} finally {
-					try {
-						deps.taskStore.transition(taskId, endReason);
-					} catch {
-						// already terminal (e.g. aborted → killed)
-					}
-					const finalTask = deps.taskStore.get(taskId);
-					const endStatus:
-						| "completed"
-						| "failed"
-						| "killed"
-						| "budget_exceeded" =
-						finalTask.status === "pending" || finalTask.status === "running"
-							? "failed"
-							: finalTask.status;
-					void deps.auditLog.append({
-						event: "task.end",
-						ts: Date.now(),
-						task_id: taskId,
-						status: endStatus,
-						steps: finalTask.step ?? 0,
-						total_usd: finalTask.totalUsd ?? 0,
-						total_tokens: finalTask.totalTokens ?? 0,
-					});
-					if (activeTaskId === taskId) {
-						activeHost = undefined;
-						activeTaskId = undefined;
-					}
-				}
-			})();
-			return taskId;
+			if (trackActive && trackActive.taskId === taskId) {
+				trackActive.host = undefined;
+				trackActive.taskId = undefined;
+			}
+		}
+	})();
+	return taskId;
+}
+
+function createOrchestrator(deps: OrchestratorDeps): AgentOrchestrator & {
+	startBackgroundTask: (
+		prompt: string,
+		target: (chunk: StreamChunk) => void,
+	) => Promise<string>;
+} {
+	const active: { host?: AgentHost; taskId?: string } = {};
+	return {
+		async startTask(prompt: string, target: (chunk: StreamChunk) => void) {
+			return runOneTask(deps, prompt, target, active);
+		},
+		// Routines run here: no `active` slot → user's sidebar session is never
+		// clobbered. cancel() / getHost() only ever see UI-origin tasks.
+		async startBackgroundTask(
+			prompt: string,
+			target: (chunk: StreamChunk) => void,
+		) {
+			return runOneTask(deps, prompt, target, null);
 		},
 		cancel(taskId: string) {
-			if (activeTaskId === taskId) activeHost?.cancel();
+			if (active.taskId === taskId) active.host?.cancel();
 			try {
 				deps.taskStore.abort(taskId);
 			} catch {
@@ -224,7 +247,7 @@ function createOrchestrator(deps: {
 			}
 		},
 		getHost() {
-			return activeHost;
+			return active.host;
 		},
 	};
 }
@@ -472,7 +495,10 @@ async function createMainWindow(
 	const routinesEngine = new RoutinesEngine({
 		dir: path.join(userDataDir, "agent-browser", "routines"),
 		orchestrator: {
-			startTask: (prompt, target) => orchestrator.startTask(prompt, target),
+			// Route scheduled routines through the background task channel so
+			// a cron tick never interrupts the user's live sidebar session.
+			startTask: (prompt, target) =>
+				orchestrator.startBackgroundTask(prompt, target),
 		},
 	});
 	void routinesEngine.load().then(() => routinesEngine.start());
