@@ -10,9 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # pnpm/action-setup@v4 rejects specifying both `version` here and
+      # `packageManager` in package.json. We keep the authoritative version
+      # in package.json and let the action pick it up.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
       - uses: actions/setup-node@v4
         with:
           node-version: 20
