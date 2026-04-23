@@ -24,6 +24,14 @@ export interface ProfileView {
 	removable: boolean;
 }
 
+export interface McpStatusView {
+	enabled: boolean;
+	running: boolean;
+	port: number;
+	endpoint: string | null;
+	token: string | null;
+}
+
 export interface SyncStatusView {
 	configured: boolean;
 	unlocked: boolean;
@@ -284,6 +292,12 @@ export interface AgentBrowserBridge {
 		install: (folder?: string) => Promise<ExtensionView | null>;
 		remove: (id: string) => Promise<boolean>;
 		setEnabled: (id: string, enabled: boolean) => Promise<ExtensionView>;
+	};
+	mcp: {
+		status: () => Promise<McpStatusView>;
+		enable: (port?: number) => Promise<McpStatusView>;
+		disable: () => Promise<McpStatusView>;
+		regenerateToken: () => Promise<McpStatusView>;
 	};
 	sync: {
 		status: () => Promise<SyncStatusView>;

@@ -44,6 +44,12 @@ contextBridge.exposeInMainWorld("agentBrowser", {
 		setEnabled: (id: string, enabled: boolean) =>
 			ipcRenderer.invoke("extensions:setEnabled", id, enabled),
 	},
+	mcp: {
+		status: () => ipcRenderer.invoke("mcp:status"),
+		enable: (port?: number) => ipcRenderer.invoke("mcp:enable", port),
+		disable: () => ipcRenderer.invoke("mcp:disable"),
+		regenerateToken: () => ipcRenderer.invoke("mcp:regenerateToken"),
+	},
 	sync: {
 		status: () => ipcRenderer.invoke("sync:status"),
 		configure: (passphrase: string, serverUrl?: string) =>
