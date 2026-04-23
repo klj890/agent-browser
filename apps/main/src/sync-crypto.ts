@@ -18,6 +18,7 @@
 import {
 	createCipheriv,
 	createDecipheriv,
+	createHmac,
 	randomBytes,
 	scrypt as scryptCb,
 	timingSafeEqual,
@@ -119,24 +120,21 @@ export function decrypt(key: Buffer, env: EnvelopeV1): string {
 
 /**
  * Compute a deterministic, non-reversible pointer ID from a plaintext key
- * (e.g. bookmark URL). Uses HMAC-style construction: scrypt-derived key
- * HKDF-ish seeded with the stable KEY input wouldn't pay off here — we just
- * keep it simple with AES-GCM over the key itself for confirmability.
+ * (e.g. bookmark URL). Uses HMAC-SHA256(key, plaintextId) — a stateless,
+ * MAC-equivalent construction that is the standard recipe for "stable opaque
+ * ID the server can dedup on without learning the plaintext".
  *
- * Used so the server can dedup rows without ever seeing the plaintext URL.
+ * Previously used AES-256-GCM over a fixed zero IV, which is a classic
+ * crypto misuse: GCM's underlying CTR stream becomes the same keystream
+ * for every plaintext, so XORing two pointers leaks XOR of their plaintexts
+ * (many-time-pad attack). HMAC-SHA256 has no such pitfall and is faster.
  */
 export function itemPointer(key: Buffer, plaintextId: string): string {
-	// Fixed zero IV is OK here because (a) we only need determinism, (b) we
-	// never pair this IV with real user content — it encrypts *just* the
-	// item ID, which is already a semi-public handle. GCM tag acts as MAC.
-	const iv = Buffer.alloc(IV_BYTES, 0);
-	const cipher = createCipheriv("aes-256-gcm", key, iv);
-	const ct = Buffer.concat([
-		cipher.update(plaintextId, "utf8"),
-		cipher.final(),
-	]);
-	const tag = cipher.getAuthTag();
-	return toB64Url(Buffer.concat([ct, tag]));
+	if (key.length !== KEY_BYTES) {
+		throw new Error(`key must be ${KEY_BYTES} bytes (got ${key.length})`);
+	}
+	const mac = createHmac("sha256", key).update(plaintextId, "utf8").digest();
+	return toB64Url(mac);
 }
 
 /**
