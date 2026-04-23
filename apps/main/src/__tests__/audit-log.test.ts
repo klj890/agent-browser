@@ -156,7 +156,9 @@ describe("AuditLog — rotation", () => {
 		const log = new AuditLog({ dir: tmp, now: () => ts });
 		await log.append(sample("task.start"));
 		await log.close();
-		expect(readdirSync(tmp)).toEqual(["2026-01-05.jsonl"]);
+		expect(readdirSync(tmp).filter((n) => n.endsWith(".jsonl"))).toEqual([
+			"2026-01-05.jsonl",
+		]);
 	});
 
 	it("rotates when UTC day advances across appends", async () => {
@@ -166,7 +168,9 @@ describe("AuditLog — rotation", () => {
 		now = Date.UTC(2026, 0, 6, 0, 0, 30); // cross midnight UTC
 		await log.append(sample("task.end"));
 		await log.close();
-		const files = readdirSync(tmp).sort();
+		const files = readdirSync(tmp)
+			.filter((n) => n.endsWith(".jsonl"))
+			.sort();
 		expect(files).toEqual(["2026-01-05.jsonl", "2026-01-06.jsonl"]);
 		expect(readLines(path.join(tmp, "2026-01-05.jsonl"))).toHaveLength(1);
 		expect(readLines(path.join(tmp, "2026-01-06.jsonl"))).toHaveLength(1);
@@ -180,10 +184,11 @@ describe("AuditLog — rotation", () => {
 		await log.rotate();
 		await log.append(sample("task.end"));
 		await log.close();
-		expect(readdirSync(tmp).sort()).toEqual([
-			"2026-01-05.jsonl",
-			"2026-01-07.jsonl",
-		]);
+		expect(
+			readdirSync(tmp)
+				.filter((n) => n.endsWith(".jsonl"))
+				.sort(),
+		).toEqual(["2026-01-05.jsonl", "2026-01-07.jsonl"]);
 	});
 });
 

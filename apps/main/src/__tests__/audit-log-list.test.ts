@@ -214,4 +214,49 @@ describe("AuditLog.list / listTasks / clear", () => {
 			expect(after[0].task_id).toBe("t2");
 		}
 	});
+
+	it("backfills the SQLite index from pre-existing jsonl on first boot", async () => {
+		// Simulate an older install: only jsonl files exist, no events.sqlite.
+		const fs = await import("node:fs");
+		const day = "2026-04-23";
+		const jsonl = [
+			'{"event":"task.start","ts":1700000000000,"task_id":"t1","user_prompt_hash":"h","persona":"p","tab_url":"https://a"}',
+			'{"event":"task.end","ts":1700000005000,"task_id":"t1","status":"completed","steps":3,"total_usd":0.01,"total_tokens":100}',
+		].join("\n");
+		fs.writeFileSync(path.join(tmp, `${day}.jsonl`), `${jsonl}\n`);
+
+		// Fresh AuditLog — index is empty, so constructor replays the jsonl.
+		const log = new AuditLog({ dir: tmp });
+		const events = log.list();
+		expect(events.map((e) => e.event)).toEqual(["task.end", "task.start"]);
+		const tasks = log.listTasks();
+		expect(tasks).toHaveLength(1);
+		expect(tasks[0]?.status).toBe("completed");
+		expect(tasks[0]?.ended_at).toBe(1_700_000_005_000);
+	});
+
+	it("list() honors limit/offset via SQL pagination", async () => {
+		const log = new AuditLog({
+			dir: tmp,
+			now: fakeClock(1_700_000_000_000),
+			dbPath: ":memory:",
+		});
+		for (let i = 0; i < 10; i++) {
+			await log.append({
+				event: "task.state-change",
+				ts: 1_700_000_000_000 + i * 1000,
+				task_id: `t${i}`,
+				from: "pending",
+				to: "running",
+			});
+		}
+		expect(
+			log.list({ limit: 3 }).map((e) => (e as { task_id: string }).task_id),
+		).toEqual(["t9", "t8", "t7"]);
+		expect(
+			log
+				.list({ limit: 3, offset: 3 })
+				.map((e) => (e as { task_id: string }).task_id),
+		).toEqual(["t6", "t5", "t4"]);
+	});
 });
