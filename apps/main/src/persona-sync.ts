@@ -263,10 +263,12 @@ async function fetchFromSource(
 	timeoutMs: number,
 ): Promise<RemotePersona[]> {
 	const since = cache.lastUpdatedForSource(src.id);
-	// Use the URL API so an admin-configured `src.url` with a trailing
-	// slash, or one that already carries query parameters, doesn't produce
-	// a malformed request. searchParams.set also handles encoding for us.
-	const urlObj = new URL(`${src.url.replace(/\/$/, "")}/api/personas`);
+	// Build the endpoint by mutating the URL's pathname so pre-existing
+	// query parameters on `src.url` (e.g. `?org=acme`) are preserved
+	// instead of being concatenated into the path. String concatenation
+	// before parsing produces garbage like `?a=b/api/personas`.
+	const urlObj = new URL(src.url);
+	urlObj.pathname = `${urlObj.pathname.replace(/\/$/, "")}/api/personas`;
 	if (since > 0) urlObj.searchParams.set("since", String(since));
 	const url = urlObj.toString();
 	const ctrl = new AbortController();

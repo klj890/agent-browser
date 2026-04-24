@@ -75,6 +75,14 @@ export class PersonaSourceStore {
 	}
 
 	upsert(src: NewPersonaSource): PersonaSource {
+		// Fail-fast URL validation at the configuration boundary. Without
+		// this, an admin typo lands in the DB and only surfaces as a
+		// silent per-source sync failure hours later.
+		try {
+			new URL(src.url);
+		} catch {
+			throw new Error(`persona source '${src.id}' has invalid url: ${src.url}`);
+		}
 		const now = Date.now();
 		const enabled = src.enabled ?? true;
 		this.appDb.db

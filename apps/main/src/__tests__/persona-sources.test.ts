@@ -55,7 +55,7 @@ describe("PersonaSourceStore", () => {
 		store.upsert({
 			id: "s",
 			name: "s",
-			url: "u",
+			url: "https://u.example.com",
 			kind: "team",
 			enabled: true,
 		});
@@ -68,7 +68,7 @@ describe("PersonaSourceStore", () => {
 	it("remove purges the source AND its cached personas", () => {
 		const db = mkDb();
 		const store = new PersonaSourceStore(db);
-		store.upsert({ id: "s", name: "s", url: "u", kind: "team" });
+		store.upsert({ id: "s", name: "s", url: "https://u.example.com", kind: "team" });
 		new PersonaCache(db).upsertMany([remote("p1"), remote("p2")], "s");
 		expect(new PersonaCache(db).listBySource("s")).toHaveLength(2);
 		store.remove("s");
@@ -91,6 +91,16 @@ describe("PersonaSourceStore", () => {
 			PERSONA_SERVER_URL: "https://different.example.com",
 		});
 		expect(again).toBeUndefined();
+		db.close();
+	});
+
+	it("upsert rejects malformed urls at the boundary (fail-fast)", () => {
+		const db = mkDb();
+		const store = new PersonaSourceStore(db);
+		expect(() =>
+			store.upsert({ id: "x", name: "x", url: "not a url", kind: "team" }),
+		).toThrow(/invalid url/);
+		expect(store.list()).toHaveLength(0);
 		db.close();
 	});
 
@@ -287,6 +297,32 @@ describe("syncPersonasFromAllSources", () => {
 		const picked = pm.getBySlug("assistant");
 		expect(picked?.description).toBe("public copy");
 		expect(picked?.source?.id).toBe("pub");
+		db.close();
+	});
+
+	it("preserves pre-existing query parameters on source url", async () => {
+		const db = mkDb();
+		const sources = new PersonaSourceStore(db);
+		sources.upsert({
+			id: "s",
+			name: "S",
+			url: "https://srv.example.com/base?org=acme",
+			kind: "team",
+		});
+		const pm = new PersonaManager();
+		let seenUrl: string | undefined;
+		const fetchImpl = vi.fn(async (url: string) => {
+			seenUrl = String(url);
+			return { ok: true, json: async () => [] } as Response;
+		}) as unknown as typeof fetch;
+		await syncPersonasFromAllSources({
+			appDb: db,
+			personaManager: pm,
+			sources,
+			fetchImpl,
+		});
+		// org=acme must survive, and /api/personas must land on the pathname.
+		expect(seenUrl).toBe("https://srv.example.com/base/api/personas?org=acme");
 		db.close();
 	});
 
