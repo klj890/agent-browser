@@ -183,6 +183,25 @@ describe("createFsSkills — sandbox", () => {
 		if (!res.ok) expect(res.reason).toBe("not_in_sandbox");
 	});
 
+	it("resolveExistingAncestor handles root parent ('/') without chopping leaf chars", async () => {
+		// `/missing` doesn't exist; its parent is `/`. A naive offset of
+		// parent.length + sep.length would slice(2) off '/missing' and
+		// yield 'issing', so a write to `/missing` would lexically check
+		// as `/issing` and slip through an accidentally-permissive sandbox.
+		const driver = memDriver({ "/": "<dir>" });
+		const skills = createFsSkills(mkSandbox(driver, ["/work"]));
+		const res = (await getSkill(skills, "fs_write").execute({
+			path: "/missing",
+			content: "x",
+		})) as FsWriteResult;
+		expect(res.ok).toBe(false);
+		if (!res.ok) {
+			expect(res.reason).toBe("not_in_sandbox");
+			// The detail should reflect the correct leaf, not a mis-sliced one.
+			expect(res.detail).toBe("/missing");
+		}
+	});
+
 	it("parent-symlink escape on NEW file → rejected (lexical fallback is not enough)", async () => {
 		// /sandbox exists; /sandbox/link_to_etc is a symlink to /etc.
 		// The Agent asks to write /sandbox/link_to_etc/new_file. realpath

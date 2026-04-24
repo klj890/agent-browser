@@ -224,13 +224,26 @@ async function resolveExistingAncestor(
 	for (let i = 0; i < 64; i++) {
 		try {
 			const realAncestor = await sandbox.driver.realpath(cursor);
-			return tailParts.length === 0
-				? realAncestor
-				: `${realAncestor}${sandbox.sep}${tailParts.reverse().join(sandbox.sep)}`;
+			if (tailParts.length === 0) return realAncestor;
+			// If the ancestor already ends with the separator (root `/` or
+			// Windows drive root `C:\\`), don't add another or we produce
+			// `//missing` / `C:\\\\missing` — cosmetic in most cases but
+			// breaks downstream `startsWith` checks that assume no double
+			// separators.
+			const joiner = realAncestor.endsWith(sandbox.sep) ? "" : sandbox.sep;
+			return `${realAncestor}${joiner}${tailParts.reverse().join(sandbox.sep)}`;
 		} catch {
 			const parent = sandbox.dirname(cursor);
 			if (parent === cursor) break; // reached filesystem root
-			const leaf = cursor.slice(parent.length + sandbox.sep.length);
+			// When parent already ends with the separator (root case), slicing
+			// an extra `sep.length` would chop a real character off the leaf.
+			// `/missing` → parent `/` → naive slice(1+1)=2 drops 'm' and
+			// returns 'issing'. Branch on whether parent already carries a
+			// trailing separator.
+			const offset = parent.endsWith(sandbox.sep)
+				? parent.length
+				: parent.length + sandbox.sep.length;
+			const leaf = cursor.slice(offset);
 			if (leaf) tailParts.push(leaf);
 			cursor = parent;
 		}
