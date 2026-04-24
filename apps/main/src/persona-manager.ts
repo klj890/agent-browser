@@ -233,6 +233,21 @@ export class PersonaManager {
 	}
 
 	/**
+	 * Drop every persona whose source is a remote feed (team/public). Local
+	 * file personas and any personas without a source attribution are left
+	 * alone. Called by persona-sync before re-injecting the full cache so
+	 * that unsubscribing a source is reflected immediately without requiring
+	 * an app restart.
+	 */
+	clearRemote(): void {
+		for (const [slug, p] of this.bySlug) {
+			if (p.source?.kind === "team" || p.source?.kind === "public") {
+				this.bySlug.delete(slug);
+			}
+		}
+	}
+
+	/**
 	 * Load personas previously synced to the `personas_cache` SQLite table.
 	 * Accepts anything with a `list()` returning Persona[] so callers don't
 	 * have to depend on `persona-sync` types here.

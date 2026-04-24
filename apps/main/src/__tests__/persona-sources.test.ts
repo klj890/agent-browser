@@ -320,6 +320,48 @@ describe("syncPersonasFromAllSources", () => {
 		db.close();
 	});
 
+	it("unsubscribing a source clears its personas from PM on next sync (no restart needed)", async () => {
+		const db = mkDb();
+		const sources = new PersonaSourceStore(db);
+		sources.upsert({ id: "team", name: "T", url: "https://t", kind: "team" });
+		const pm = new PersonaManager();
+		// Inject a *local* persona too; clearRemote must NOT evict it.
+		pm.register({
+			slug: "local-only",
+			name: "Local Only",
+			description: "",
+			contentMd: "",
+			frontmatter: { name: "Local Only", description: "", domains: [] },
+			source: { id: "local", kind: "local", name: "Local" },
+		});
+		const fetchImpl = vi.fn(async () => {
+			return {
+				ok: true,
+				json: async () => [remote("team-one"), remote("team-two")],
+			} as Response;
+		}) as unknown as typeof fetch;
+		await syncPersonasFromAllSources({
+			appDb: db,
+			personaManager: pm,
+			sources,
+			fetchImpl,
+		});
+		expect(pm.getBySlug("team-one")).toBeDefined();
+		expect(pm.getBySlug("local-only")).toBeDefined();
+		// Unsubscribe the team source (cascade removes personas_cache rows)
+		sources.remove("team");
+		await syncPersonasFromAllSources({
+			appDb: db,
+			personaManager: pm,
+			sources,
+			fetchImpl,
+		});
+		expect(pm.getBySlug("team-one")).toBeUndefined();
+		expect(pm.getBySlug("team-two")).toBeUndefined();
+		expect(pm.getBySlug("local-only")).toBeDefined(); // local preserved
+		db.close();
+	});
+
 	it("disabled source is skipped", async () => {
 		const db = mkDb();
 		const sources = new PersonaSourceStore(db);

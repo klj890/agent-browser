@@ -237,6 +237,11 @@ export async function syncPersonasFromAllSources(deps: {
 	);
 
 	const all = cache.list();
+	// Drop previously-injected remote personas before re-injecting so that
+	// unsubscribing a source (which cascades to persona_sources.remove →
+	// personas_cache purge) is visible without an app restart. Local
+	// file-system personas are kept — clearRemote only touches team/public.
+	deps.personaManager.clearRemote();
 	deps.personaManager.upsert(all);
 	return { sources: outcomes, total: all.length };
 }
