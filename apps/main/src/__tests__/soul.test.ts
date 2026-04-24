@@ -131,6 +131,18 @@ describe("FileSoulProvider", () => {
 		await expect(p.load()).rejects.toThrow(/exceeds/);
 	});
 
+	it("enforces the cap in BYTES, not UTF-16 code units — multi-byte text is counted correctly", async () => {
+		const p = new FileSoulProvider({
+			path: soulPath,
+			defaultBody: "x",
+		});
+		// Each 中 is 3 UTF-8 bytes; 23000 chars ≈ 69000 bytes (over 64KB)
+		// but length === 23000 (under 64*1024 === 65536). A naive
+		// str.length guard would accept this file.
+		await writeFile(soulPath, "中".repeat(23_000), "utf8");
+		await expect(p.load()).rejects.toThrow(/exceeds/);
+	});
+
 	it("non-fatal seed-write failure: still returns default to caller", async () => {
 		const fsImpl = {
 			readFile: vi.fn(async () => {

@@ -121,13 +121,17 @@ export class FileSoulProvider implements SoulProvider {
 
 	async load(): Promise<string> {
 		try {
-			const raw = await this.fs.readFile(this.path, "utf8");
-			if (raw.length > SOUL_MAX_BYTES) {
+			// Read as Buffer so we can bound by real byte count. Using
+			// `readFile(..., "utf8").length` counts UTF-16 code units — a
+			// file of Chinese/emoji text would under-report its size and
+			// sneak past the 64KB cap.
+			const buf = (await this.fs.readFile(this.path)) as Buffer;
+			if (buf.byteLength > SOUL_MAX_BYTES) {
 				throw new Error(
-					`soul.md exceeds ${SOUL_MAX_BYTES} bytes (${raw.length})`,
+					`soul.md exceeds ${SOUL_MAX_BYTES} bytes (${buf.byteLength})`,
 				);
 			}
-			return raw;
+			return buf.toString("utf8");
 		} catch (err) {
 			if (!isEnoent(err)) throw err;
 			if (this.seedOnMissing) {
