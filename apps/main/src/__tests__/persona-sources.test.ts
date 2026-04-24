@@ -68,7 +68,12 @@ describe("PersonaSourceStore", () => {
 	it("remove purges the source AND its cached personas", () => {
 		const db = mkDb();
 		const store = new PersonaSourceStore(db);
-		store.upsert({ id: "s", name: "s", url: "https://u.example.com", kind: "team" });
+		store.upsert({
+			id: "s",
+			name: "s",
+			url: "https://u.example.com",
+			kind: "team",
+		});
 		new PersonaCache(db).upsertMany([remote("p1"), remote("p2")], "s");
 		expect(new PersonaCache(db).listBySource("s")).toHaveLength(2);
 		store.remove("s");
