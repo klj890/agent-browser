@@ -76,6 +76,24 @@ describe("MemoryStore — daily", () => {
 		expect(body.match(/^# 2026-04-24$/gm)).toHaveLength(1);
 	});
 
+	it("concurrent appendDaily calls do not lose writes and produce one header", async () => {
+		const mem = new MemoryStore({
+			dir,
+			now: () => new Date("2026-04-24T10:00:00Z"),
+		});
+		// 20 concurrent appends — race prone on the old read-modify-write.
+		await Promise.all(
+			Array.from({ length: 20 }, (_, i) => mem.appendDaily(`note ${i}`)),
+		);
+		const body = await mem.readDaily("2026-04-24");
+		// Every note survives.
+		for (let i = 0; i < 20; i++) {
+			expect(body).toContain(`note ${i}`);
+		}
+		// Exactly one header.
+		expect(body.match(/^# 2026-04-24$/gm)).toHaveLength(1);
+	});
+
 	it("readDaily returns '' for a missing date", async () => {
 		const mem = new MemoryStore({ dir });
 		expect(await mem.readDaily("2020-01-01")).toBe("");

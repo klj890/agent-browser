@@ -27,6 +27,7 @@
  *     (next increment) can plug the UI directly. No new tools exposed here.
  */
 import {
+	appendFile,
 	mkdir,
 	readdir,
 	readFile,
@@ -148,14 +149,21 @@ export class MemoryStore {
 		const file = path.join(this.dailyDir, `${date}.md`);
 		const ts = this.now().toISOString();
 		const line = `- [${ts}] ${clean}\n`;
-		let existing = "";
+		// Atomic first-write vs subsequent-append. The old read-modify-write
+		// pattern raced under concurrent appends — two simultaneous calls
+		// could both read "" and each write their own header-plus-line,
+		// the second overwriting the first. Now:
+		//   • wx flag creates file exclusively; the winning caller writes
+		//     header + its own line; losers get EEXIST.
+		//   • EEXIST branch calls appendFile, which the OS guarantees lands
+		//     as an atomic tail-write (O_APPEND / FILE_APPEND_DATA). Safe
+		//     for any number of concurrent callers.
 		try {
-			existing = await readFile(file, "utf-8");
+			await writeFile(file, `# ${date}\n\n${line}`, { flag: "wx" });
 		} catch (err) {
-			if (!isEnoent(err)) throw err;
+			if ((err as { code?: string } | null)?.code !== "EEXIST") throw err;
+			await appendFile(file, line);
 		}
-		const header = existing === "" ? `# ${date}\n\n` : "";
-		await writeFile(file, existing + header + line, "utf-8");
 	}
 
 	/** Read a specific daily file by ISO date. Empty string if missing. */
