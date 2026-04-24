@@ -2,15 +2,22 @@
  * Default production `StreamFn` factory (Stage 3.4).
  *
  * Reads API keys from environment and builds the CogniRefract-style fallback
- * chain: **Gemini → Claude → DeepSeek → Qwen** (附录 G default order). If no
- * keys are set (e.g. dev environment, CI, or unit tests), we fall back to
- * `mockEchoStream()` so the app still boots and `pnpm test` stays green.
+ * chain: **Gemini → Claude → DeepSeek → Qwen → LM Studio → Ollama** (附录 G
+ * default order, with local fallbacks appended per BrowserOS §2.8 ruleset).
+ * If nothing is configured (dev environment, CI, unit tests), we fall back
+ * to `mockEchoStream()` so the app still boots and `pnpm test` stays green.
+ *
+ * Local providers trail the chain because network-hosted models are usually
+ * stronger for agentic workloads; Ollama/LM Studio kick in only when every
+ * remote hop has failed (offline dev, egress block, provider outage).
  *
  * Default models (2026-04 vintage; tunable via env vars):
- *   - Gemini   : `gemini-2.0-flash-exp`
- *   - Claude   : `claude-sonnet-4-6`
- *   - DeepSeek : `deepseek-chat`
- *   - Qwen     : `qwen-plus`
+ *   - Gemini    : `gemini-2.0-flash-exp`
+ *   - Claude    : `claude-sonnet-4-6`
+ *   - DeepSeek  : `deepseek-chat`
+ *   - Qwen      : `qwen-plus`
+ *   - LM Studio : (user-selected, no default — must set `LMSTUDIO_MODEL`)
+ *   - Ollama    : `llama3.1` (tune via `OLLAMA_MODEL`)
  */
 
 import { mockEchoStream, type StreamFn } from "../agent-host.js";
@@ -97,6 +104,44 @@ export function buildProviderChain(
 					"https://dashscope.aliyuncs.com/compatible-mode/v1",
 				apiKey: qwenKey,
 				model: env.DASHSCOPE_MODEL ?? "qwen-plus",
+				fetchImpl,
+			}),
+		);
+	}
+
+	// Local OpenAI-compatible endpoints. Opt-in: only if the user set the
+	// base URL env var (they run the daemon themselves). No API key is sent;
+	// OpenAiCompatProvider omits the Authorization header when apiKey is
+	// blank so local daemons don't 401 on `Bearer `.
+	// All env reads .trim() so a trailing newline from a sloppy `.env`
+	// copy-paste doesn't ship whitespace into URLs/model names (same
+	// motivation as the apiKey trim in OpenAiCompatProvider).
+	const lmStudioUrl = env.LMSTUDIO_BASE_URL?.trim();
+	const lmStudioModel = env.LMSTUDIO_MODEL?.trim();
+	if (lmStudioUrl && lmStudioModel) {
+		// LM Studio requires the user to pick a loaded model name — there's
+		// no sensible default, so we only enable this provider when both
+		// URL + model are configured.
+		providers.push(
+			new OpenAiCompatProvider({
+				name: "lmstudio",
+				baseUrl: lmStudioUrl,
+				model: lmStudioModel,
+				fetchImpl,
+			}),
+		);
+	}
+
+	const ollamaUrl = env.OLLAMA_BASE_URL?.trim();
+	if (ollamaUrl) {
+		providers.push(
+			new OpenAiCompatProvider({
+				name: "ollama",
+				baseUrl: ollamaUrl,
+				// `||` (not `??`) so that `OLLAMA_MODEL=""` or whitespace-only
+				// falls back too — empty env vars shouldn't reach the
+				// provider as a model name.
+				model: env.OLLAMA_MODEL?.trim() || "llama3.1",
 				fetchImpl,
 			}),
 		);

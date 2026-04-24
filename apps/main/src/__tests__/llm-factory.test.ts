@@ -84,6 +84,168 @@ describe("buildProviderChain", () => {
 		expect(chain).toHaveLength(1);
 		expect(chain[0]?.name).toBe("anthropic");
 	});
+
+	it("appends Ollama to the chain when OLLAMA_BASE_URL is set (no key needed)", () => {
+		const chain = buildProviderChain({
+			GEMINI_API_KEY: "g",
+			OLLAMA_BASE_URL: "http://localhost:11434/v1",
+		});
+		expect(chain.map((p) => p.name)).toEqual(["gemini", "ollama"]);
+	});
+
+	it("appends LM Studio only when both URL and model are configured", () => {
+		// URL alone is insufficient — LM Studio has no sensible default model.
+		expect(
+			buildProviderChain({ LMSTUDIO_BASE_URL: "http://localhost:1234/v1" }).map(
+				(p) => p.name,
+			),
+		).toEqual([]);
+		// With both, provider joins the chain.
+		expect(
+			buildProviderChain({
+				LMSTUDIO_BASE_URL: "http://localhost:1234/v1",
+				LMSTUDIO_MODEL: "Meta-Llama-3.1-8B-Instruct",
+			}).map((p) => p.name),
+		).toEqual(["lmstudio"]);
+	});
+
+	it("local providers trail remote providers in the fallback order", () => {
+		const chain = buildProviderChain({
+			GEMINI_API_KEY: "g",
+			ANTHROPIC_API_KEY: "a",
+			DEEPSEEK_API_KEY: "d",
+			DASHSCOPE_API_KEY: "q",
+			LMSTUDIO_BASE_URL: "http://localhost:1234/v1",
+			LMSTUDIO_MODEL: "x",
+			OLLAMA_BASE_URL: "http://localhost:11434/v1",
+		});
+		expect(chain.map((p) => p.name)).toEqual([
+			"gemini",
+			"anthropic",
+			"deepseek",
+			"qwen",
+			"lmstudio",
+			"ollama",
+		]);
+	});
+});
+
+describe("OpenAiCompatProvider — local mode (no apiKey)", () => {
+	it("omits Authorization header when apiKey is undefined", async () => {
+		const captured: Array<{ headers: Headers | Record<string, string> }> = [];
+		const fakeFetch: typeof fetch = async (_url, init) => {
+			captured.push({
+				headers: (init?.headers as Record<string, string>) ?? {},
+			});
+			// Minimal valid SSE response: one data: [DONE].
+			return new Response("data: [DONE]\n\n", {
+				status: 200,
+				headers: { "Content-Type": "text/event-stream" },
+			});
+		};
+		const { OpenAiCompatProvider } = await import(
+			"../llm/openai-compatible.js"
+		);
+		const p = new OpenAiCompatProvider({
+			name: "local",
+			baseUrl: "http://localhost:11434/v1",
+			model: "llama3.1",
+			fetchImpl: fakeFetch,
+		});
+		for await (const _c of p.stream({
+			messages: [{ role: "user", content: "hi" }],
+			tools: [],
+		})) {
+			/* drain */
+		}
+		expect(captured).toHaveLength(1);
+		const hdr = captured[0]?.headers as Record<string, string>;
+		expect(hdr.Authorization).toBeUndefined();
+	});
+
+	it("still sends Authorization when apiKey is provided", async () => {
+		const captured: Array<Record<string, string>> = [];
+		const fakeFetch: typeof fetch = async (_url, init) => {
+			captured.push((init?.headers as Record<string, string>) ?? {});
+			return new Response("data: [DONE]\n\n", {
+				status: 200,
+				headers: { "Content-Type": "text/event-stream" },
+			});
+		};
+		const { OpenAiCompatProvider } = await import(
+			"../llm/openai-compatible.js"
+		);
+		const p = new OpenAiCompatProvider({
+			name: "remote",
+			baseUrl: "https://api.example.com/v1",
+			apiKey: "sk-xyz",
+			model: "gpt-test",
+			fetchImpl: fakeFetch,
+		});
+		for await (const _c of p.stream({
+			messages: [{ role: "user", content: "hi" }],
+			tools: [],
+		})) {
+			/* drain */
+		}
+		expect(captured[0]?.Authorization).toBe("Bearer sk-xyz");
+	});
+
+	it("trims whitespace-only apiKey to undefined (no 'Bearer   ' header)", async () => {
+		const captured: Array<Record<string, string>> = [];
+		const fakeFetch: typeof fetch = async (_url, init) => {
+			captured.push((init?.headers as Record<string, string>) ?? {});
+			return new Response("data: [DONE]\n\n", {
+				status: 200,
+				headers: { "Content-Type": "text/event-stream" },
+			});
+		};
+		const { OpenAiCompatProvider } = await import(
+			"../llm/openai-compatible.js"
+		);
+		const p = new OpenAiCompatProvider({
+			name: "local",
+			baseUrl: "http://localhost:11434/v1",
+			apiKey: "   \n",
+			model: "llama3.1",
+			fetchImpl: fakeFetch,
+		});
+		for await (const _c of p.stream({
+			messages: [{ role: "user", content: "hi" }],
+			tools: [],
+		})) {
+			/* drain */
+		}
+		expect(captured[0]?.Authorization).toBeUndefined();
+	});
+
+	it("treats apiKey='' same as undefined (no Authorization header)", async () => {
+		const captured: Array<Record<string, string>> = [];
+		const fakeFetch: typeof fetch = async (_url, init) => {
+			captured.push((init?.headers as Record<string, string>) ?? {});
+			return new Response("data: [DONE]\n\n", {
+				status: 200,
+				headers: { "Content-Type": "text/event-stream" },
+			});
+		};
+		const { OpenAiCompatProvider } = await import(
+			"../llm/openai-compatible.js"
+		);
+		const p = new OpenAiCompatProvider({
+			name: "local",
+			baseUrl: "http://localhost:11434/v1",
+			apiKey: "",
+			model: "llama3.1",
+			fetchImpl: fakeFetch,
+		});
+		for await (const _c of p.stream({
+			messages: [{ role: "user", content: "hi" }],
+			tools: [],
+		})) {
+			/* drain */
+		}
+		expect(captured[0]?.Authorization).toBeUndefined();
+	});
 });
 
 // Optional live-network smoke tests — default-skipped when API keys are not
