@@ -58,7 +58,18 @@ export const AdminPolicySchema = z.object({
 	autonomy: AutonomyLevel.default("confirm-each"),
 	allowedTools: z
 		.array(z.string())
-		.default(["snapshot", "read", "goto", "act", "screenshot"]),
+		.default([
+			"snapshot",
+			"read",
+			"goto",
+			"act",
+			"screenshot",
+			"tabs_list",
+			"tabs_open",
+			"tabs_close",
+			"tabs_switch",
+			"tabs_wait_load",
+		]),
 	allowedDomains: z.array(z.string()).default([]),
 	allowedUrlSchemes: z.array(UrlScheme).default(["http", "https"]),
 	blockedDomains: z.array(z.string()).default([]),

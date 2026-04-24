@@ -25,7 +25,21 @@ P0 stages **0–8 code complete**:
 - **Stage 7**: TaskStateStore + emergency stop shortcut + slash commands + ConfirmationHandler
 - **Stage 8**: electron-builder config + e2e acceptance suite + user/admin/security docs
 
-P1 (Auth Vault, routines, history semantic index, trace viewer, extensions, E2E-encrypted cloud sync) is pending.
+P1 stages **9–16 code complete**:
+
+- **Stage 9**: Auth Vault (AES-256-GCM) + `{{vault:*}}` placeholder resolver
+- **Stage 10**: RoutinesEngine + routine editor UI
+- **Stage 11**: history semantic index (sqlite-vss + transformers.js)
+- **Stage 12**: multi-profile + incognito partitions
+- **Stage 13**: Mozilla Readability reading mode + FTS
+- **Stage 14**: Trace viewer (component-per-tool-result)
+- **Stage 15**: Chrome extensions (MV3 minimal subset)
+- **Stage 16**: end-to-end encrypted bookmarks + history cloud sync (with bookmark tombstones for delete propagation)
+
+P2 in progress:
+
+- **Stage 17**: MCP server — external Claude/Cursor can drive this browser
+- **Stage 18**: multi-tab Agent coordination (tabs_list/open/close/switch/wait_load skills)
 
 ## Layout
 

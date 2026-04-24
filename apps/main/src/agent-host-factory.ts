@@ -19,7 +19,10 @@ import { fileURLToPath } from "node:url";
 import {
 	type BrowserToolsCtx,
 	createBrowserToolsSkills,
+	createTabsSkills,
 	type Skill,
+	type TabController,
+	type TabInfo,
 } from "@agent-browser/browser-tools";
 import type { AdminPolicy } from "./admin-policy.js";
 import {
@@ -91,19 +94,62 @@ export async function createAgentHostForTab(
 	const { tabManager, policy, streamFn } = deps;
 	const { tabId, persona } = opts;
 
-	const cdp = tabManager.getTabCdp(tabId);
-	const registry = tabManager.getTabRegistry(tabId);
-	if (!cdp || !registry) {
+	// Smoke-check: the starting tab must have CDP wired. Subsequent tabs
+	// (opened via tabs_open) allocate lazily on first tool use.
+	if (!tabManager.getTabCdp(tabId) || !tabManager.getTabRegistry(tabId)) {
 		throw new Error(`tab '${tabId}' has no CDP/registry (not yet loaded?)`);
 	}
-	const tabSummary = tabManager.list().find((t) => t.id === tabId);
+
+	// The Agent's "logical active tab" — decoupled from the user's foreground
+	// tab so the Agent can background-research in a tab it opened without
+	// disrupting the user. Multi-tab tools (tabs_switch) mutate this ref.
+	const activeAgentTab = { id: tabId };
+	// Use the O(1) TabManager.getSummary lookup here. list().find() was a
+	// scan per getter access, noticeable when snapshot/act read pageUrl
+	// multiple times inside a single execute().
+	const findSummary = (id: string) => tabManager.getSummary(id);
+	// Build a ctx whose cdp/registry/pageUrl/pageTitle resolve *per call* to
+	// whichever tab the Agent currently has focused. Using getters keeps the
+	// five original tools' execute() bodies unchanged.
 	const ctx: BrowserToolsCtx = {
-		cdp,
-		registry,
-		pageUrl: tabSummary?.url,
-		pageTitle: tabSummary?.title,
+		get cdp() {
+			const c = tabManager.getTabCdp(activeAgentTab.id);
+			if (!c) {
+				throw new Error(
+					`agent active tab '${activeAgentTab.id}' has no CDP (tab closed?)`,
+				);
+			}
+			return c;
+		},
+		get registry() {
+			const r = tabManager.getTabRegistry(activeAgentTab.id);
+			if (!r) {
+				throw new Error(
+					`agent active tab '${activeAgentTab.id}' has no registry (tab closed?)`,
+				);
+			}
+			return r;
+		},
+		get pageUrl() {
+			return findSummary(activeAgentTab.id)?.url;
+		},
+		get pageTitle() {
+			return findSummary(activeAgentTab.id)?.title;
+		},
 	};
-	const allSkills = createBrowserToolsSkills(ctx);
+	const navigationPolicy = {
+		allowedUrlSchemes: policy.allowedUrlSchemes,
+		allowedDomains: policy.allowedDomains,
+		blockedDomains: policy.blockedDomains,
+	};
+	const tabController = createTabControllerForAgent(tabManager, activeAgentTab);
+	const allSkills = [
+		...createBrowserToolsSkills(ctx),
+		...createTabsSkills({
+			controller: tabController,
+			policy: navigationPolicy,
+		}),
+	];
 	const skills = filterSkills(allSkills, policy, persona);
 
 	const systemPrompt = await renderTemplate(
@@ -129,9 +175,6 @@ export async function createAgentHostForTab(
 		? [...skills, createReadResultSkill(deps.toolResultStorage) as Skill]
 		: skills;
 
-	const tabUrl =
-		tabManager.list().find((t) => t.id === tabId)?.url ?? "about:blank";
-
 	const preToolHooks: Array<HookMap["pre-tool-call"]> = [];
 	if (deps.confirmation) {
 		preToolHooks.push(
@@ -150,8 +193,11 @@ export async function createAgentHostForTab(
 
 	let currentTaskIdRef: string | undefined;
 	const currentTaskId = () => currentTaskIdRef ?? "unknown";
-	let currentTabUrlRef = tabUrl;
-	const currentTabUrl = () => currentTabUrlRef;
+	// Resolve the URL of the Agent's *current* logical tab at call time, so
+	// confirmation prompts correctly attribute the origin after tabs_switch
+	// or in-tab navigation. Static capture would freeze it at construction.
+	const currentTabUrl = () =>
+		findSummary(activeAgentTab.id)?.url ?? "about:blank";
 
 	const preLlmHooks: Array<HookMap["pre-llm-call"]> = [];
 	const postLlmHooks: Array<HookMap["post-llm-call"]> = [];
@@ -213,12 +259,6 @@ export async function createAgentHostForTab(
 		vault: deps.vault,
 	});
 
-	// Track tab url so confirmation hook can report the current origin.
-	const refreshUrl = () => {
-		currentTabUrlRef =
-			tabManager.list().find((t) => t.id === tabId)?.url ?? currentTabUrlRef;
-	};
-	refreshUrl();
 	return host;
 }
 
@@ -262,6 +302,105 @@ function hashArgs(args: unknown): string {
 	} catch {
 		return "0";
 	}
+}
+
+/**
+ * Build a TabController bound to a mutable "agent active tab" ref. The
+ * controller enforces the P2-18 policy constraints (Agent can only close
+ * tabs it opened; switching does not steal user foreground) before handing
+ * off to TabManager.
+ */
+export function createTabControllerForAgent(
+	tabManager: TabManager,
+	activeAgentTab: { id: string },
+): TabController {
+	const toInfo = (
+		t: ReturnType<TabManager["list"]>[number],
+		agentActiveId: string,
+	): TabInfo => ({
+		id: t.id,
+		url: t.url,
+		title: t.title,
+		openedByAgent: t.openedByAgent,
+		agentActive: t.id === agentActiveId,
+	});
+	return {
+		list() {
+			const activeId = activeAgentTab.id;
+			return tabManager.list().map((t) => toInfo(t, activeId));
+		},
+		open(url) {
+			// url has already passed policy in the skill layer; TabManager will
+			// flag openedByAgent so tabs_close can recognise ownership.
+			return tabManager.create(url, {
+				openedByAgent: true,
+				background: true,
+			});
+		},
+		close(id) {
+			tabManager.close(id);
+			// If we just closed the tab the Agent was logically "on", re-anchor
+			// to a surviving tab so subsequent snapshot/act don't hit a dangling
+			// CDP getter. Prefer another Agent-owned tab when possible (keeps the
+			// Agent's working set coherent); otherwise fall back to any remaining
+			// tab. Empty list is fine — next tool call will surface the error.
+			if (activeAgentTab.id === id) {
+				const remaining = tabManager.list();
+				const fallback = remaining.find((t) => t.openedByAgent) ?? remaining[0];
+				if (fallback) activeAgentTab.id = fallback.id;
+			}
+		},
+		canClose(id) {
+			return tabManager.getSummary(id)?.openedByAgent === true;
+		},
+		exists(id) {
+			return tabManager.getSummary(id) !== undefined;
+		},
+		setAgentActive(id) {
+			if (!tabManager.getSummary(id)) return;
+			activeAgentTab.id = id;
+		},
+		getAgentActiveId() {
+			return activeAgentTab.id;
+		},
+		waitLoad(id, timeoutMs, signal) {
+			return new Promise((resolve) => {
+				let unsub: (() => void) | undefined;
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				let settled = false;
+				const settle = (r: Parameters<typeof resolve>[0]) => {
+					if (settled) return;
+					settled = true;
+					if (timer) clearTimeout(timer);
+					unsub?.();
+					signal?.removeEventListener("abort", onAbort);
+					resolve(r);
+				};
+				const onAbort = () => settle("aborted");
+				if (signal) {
+					if (signal.aborted) return settle("aborted");
+					signal.addEventListener("abort", onAbort, { once: true });
+				}
+				// Terminal-state check: if already idle/crashed/missing, don't
+				// even bother subscribing.
+				const probe = () => {
+					const tab = tabManager.getSummary(id);
+					if (!tab) return settle("not_found");
+					if (tab.state === "idle") return settle("idle");
+					if (tab.state === "crashed") return settle("crashed");
+				};
+				probe();
+				if (settled) return;
+				// Event-driven: wake up the moment state flips (did-finish-load /
+				// render-process-gone) or the tab is removed. No 100ms polling.
+				unsub = tabManager.addTabEventListener(id, (event) => {
+					if (event === "removed") return settle("not_found");
+					probe();
+				});
+				timer = setTimeout(() => settle("timeout"), timeoutMs);
+			});
+		},
+	};
 }
 
 function filterSkills(

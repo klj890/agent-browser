@@ -51,6 +51,24 @@ export type {
 	SnapshotResult,
 } from "./snapshot.js";
 export { SnapshotInput, snapshot } from "./snapshot.js";
+export type {
+	OpenReason,
+	TabController,
+	TabInfo,
+	TabsCloseResult,
+	TabsCtx,
+	TabsOpenResult,
+	TabsSwitchResult,
+	TabsWaitLoadResult,
+} from "./tabs.js";
+export {
+	createTabsSkills,
+	TabsCloseInput,
+	TabsListInput,
+	TabsOpenInput,
+	TabsSwitchInput,
+	TabsWaitLoadInput,
+} from "./tabs.js";
 
 // ---- Skill registry ----
 
