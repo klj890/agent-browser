@@ -23,6 +23,7 @@ import { ConfirmationHandler } from "./confirmation.js";
 import { DownloadManager } from "./download.js";
 import { registerEmergencyStop } from "./emergency-stop.js";
 import { ExtensionHost, type ExtensionSessionLike } from "./extension-host.js";
+import { ExternalMcpConfigFileStore } from "./external-mcp-config.js";
 import { HistoryStore } from "./history.js";
 import { HistoryIndex } from "./history-index.js";
 import {
@@ -44,6 +45,7 @@ import {
 	registerVaultIpc,
 } from "./ipc.js";
 import { McpConfigFileStore } from "./mcp-config.js";
+import { McpExternalManager } from "./mcp-external-manager.js";
 import { McpServerHost } from "./mcp-server.js";
 import { PersonaManager } from "./persona-manager.js";
 import { syncPersonasOnce } from "./persona-sync.js";
@@ -134,6 +136,7 @@ interface OrchestratorDeps {
 	taskStore: TaskStateStore;
 	vault: AuthVault;
 	soul: SoulProvider;
+	externalMcp: McpExternalManager;
 }
 
 /**
@@ -168,6 +171,7 @@ async function runOneTask(
 			taskStore: deps.taskStore,
 			vault: deps.vault,
 			soul: deps.soul,
+			externalMcp: deps.externalMcp,
 		},
 		{ tabId, persona: use },
 	);
@@ -608,6 +612,20 @@ async function createMainWindow(
 	});
 	const unregisterMcp = registerMcpIpc(mcpHost);
 
+	// External MCP clients (P2 §2.6). Read config and kick off parallel
+	// connections in the background — we do NOT await here so a slow or
+	// unreachable external server can't block the window from opening.
+	// Tools appear as they arrive; AgentHost picks them up next task.
+	const externalMcpConfig = new ExternalMcpConfigFileStore(
+		path.join(userDataDir, "agent-browser", "mcp-clients.json"),
+	).load();
+	const externalMcp = new McpExternalManager({
+		servers: externalMcpConfig.servers,
+	});
+	void externalMcp.start().catch((err) => {
+		console.warn("[mcp-external] start failed:", err);
+	});
+
 	const unregisterProfiles = registerProfilesIpc(profileStore, {
 		onProfileRemoved: (partition) => {
 			// Close any tabs still using the removed partition, then purge the session.
@@ -636,6 +654,7 @@ async function createMainWindow(
 		taskStore: infra.taskStore,
 		vault: infra.vault,
 		soul: infra.soul,
+		externalMcp,
 	});
 	hostRef.get = () => orchestrator.getHost();
 

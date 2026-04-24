@@ -36,6 +36,7 @@ import type { AuditLog } from "./audit-log.js";
 import type { AuthVault } from "./auth-vault.js";
 import type { ConfirmationHandler } from "./confirmation.js";
 import { createDefaultStreamFn } from "./llm/factory.js";
+import type { McpExternalManager } from "./mcp-external-manager.js";
 import type { Persona, PersonaManager } from "./persona-manager.js";
 import { renderTemplate } from "./prompts/render.js";
 import {
@@ -79,6 +80,12 @@ export interface FactoryDeps {
 	 * (e.g. in unit tests that care only about tool wiring).
 	 */
 	soul?: SoulProvider;
+	/**
+	 * Optional P2 §2.6 integration: external MCP servers whose tools get
+	 * merged into the Agent skill set (gmail / slack / github adapters).
+	 * Undefined → Agent runs with only our own browser-tools.
+	 */
+	externalMcp?: McpExternalManager;
 }
 
 export interface CreateAgentHostOpts {
@@ -150,12 +157,17 @@ export async function createAgentHostForTab(
 		blockedDomains: policy.blockedDomains,
 	};
 	const tabController = createTabControllerForAgent(tabManager, activeAgentTab);
+	const externalSkills = deps.externalMcp?.skills() ?? [];
 	const allSkills = [
 		...createBrowserToolsSkills(ctx),
 		...createTabsSkills({
 			controller: tabController,
 			policy: navigationPolicy,
 		}),
+		// External MCP tools go LAST so an externally-configured tool
+		// can never shadow a built-in by sharing its name — filterSkills
+		// later keeps only names in policy.allowedTools anyway.
+		...externalSkills,
 	];
 	const skills = filterSkills(allSkills, policy, persona);
 
@@ -425,6 +437,21 @@ export function createTabControllerForAgent(
 	};
 }
 
+/**
+ * Tool names of the form `<prefix>__<remote>` are externally-defined
+ * (P2 §2.6 MCP client) — configured out-of-band by the user, not enumerable
+ * in AdminPolicy.allowedTools. We allow them through the policy gate but
+ * still honour persona.allowedTools so a narrowly-scoped persona
+ * (e.g. "read-only research") can opt out.
+ *
+ * The double-underscore separator comes from McpExternalClient; anyone
+ * naming a first-party tool with `__` would collide on purpose and should
+ * not be doing that.
+ */
+export function isExternalMcpSkillName(name: string): boolean {
+	return name.includes("__");
+}
+
 function filterSkills(
 	all: Skill[],
 	policy: AdminPolicy,
@@ -435,7 +462,9 @@ function filterSkills(
 		? new Set(persona.frontmatter.allowedTools)
 		: null;
 	return all.filter((s) => {
-		if (!policyAllowed.has(s.name)) return false;
+		if (!policyAllowed.has(s.name) && !isExternalMcpSkillName(s.name)) {
+			return false;
+		}
 		if (personaAllowed && !personaAllowed.has(s.name)) return false;
 		return true;
 	});
