@@ -165,12 +165,12 @@ describe("McpExternalManager", () => {
 		});
 	});
 
-	it("skill.execute rejects when remote returns isError:true", async () => {
+	it("skill.execute rejects when remote returns isError:true (and includes content summary)", async () => {
 		const client = new FakeClient({
 			id: "gh",
 			tools: ["tool"],
 			call: async () => ({
-				content: [{ type: "text", text: "rate limited" }],
+				content: [{ type: "text", text: "rate limited: try again in 60s" }],
 				isError: true,
 			}),
 		});
@@ -182,7 +182,27 @@ describe("McpExternalManager", () => {
 		});
 		await mgr.start();
 		const skill = mgr.skills().find((s) => s.name === "gh__tool");
+		// Error message must include BOTH the marker AND the reason so the
+		// LLM can react to "rate limited" vs "auth failure" differently.
 		await expect(skill?.execute({})).rejects.toThrow(/isError:true/);
+		await expect(skill?.execute({})).rejects.toThrow(/rate limited/);
+	});
+
+	it("start() respects per-server timeoutMs from spec (not just default)", async () => {
+		const slow = new FakeClient({
+			id: "slow",
+			connect: () => new Promise(() => {}),
+		});
+		const mgr = new McpExternalManager({
+			servers: [spec("slow", { timeoutMs: 25 })],
+			clientFactory: (() => slow) as unknown as ConstructorParameters<
+				typeof McpExternalManager
+			>[0]["clientFactory"],
+		});
+		// Pass a generous default — the spec override must win.
+		await mgr.start(60_000);
+		expect(mgr.status()[0]?.connected).toBe(false);
+		expect(mgr.status()[0]?.error).toMatch(/timed out after 25ms/);
 	});
 
 	it("stop() disconnects every client and future skills() is empty", async () => {

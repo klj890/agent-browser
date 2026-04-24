@@ -41,7 +41,7 @@ export interface McpExternalManagerStatus {
 export class McpExternalManager {
 	private readonly clients: McpExternalClient[] = [];
 	private readonly statuses = new Map<string, McpExternalManagerStatus>();
-	private readonly errors = new Map<string, string>();
+	private readonly specById = new Map<string, ExternalMcpServer>();
 	private readonly clientFactory: (
 		spec: ExternalMcpServer,
 	) => McpExternalClient;
@@ -50,6 +50,7 @@ export class McpExternalManager {
 		this.clientFactory =
 			deps.clientFactory ?? ((spec) => new McpExternalClient({ spec }));
 		for (const spec of deps.servers) {
+			this.specById.set(spec.id, spec);
 			this.statuses.set(spec.id, {
 				id: spec.id,
 				name: spec.name,
@@ -68,9 +69,13 @@ export class McpExternalManager {
 	 * skills are simply absent from `skills()`. Same pattern as
 	 * `syncPersonasFromAllSources` in P2-19.
 	 */
-	async start(timeoutMs = 10_000): Promise<void> {
+	async start(defaultTimeoutMs = 10_000): Promise<void> {
 		await Promise.all(
 			this.clients.map(async (c) => {
+				// Prefer the per-server timeout so admins can bump a known-slow
+				// server without weakening the safety margin for everything else.
+				const spec = this.specById.get(c.id);
+				const timeoutMs = spec?.timeoutMs ?? defaultTimeoutMs;
 				try {
 					await this.withTimeout(c.connect(), timeoutMs);
 					const status = this.statuses.get(c.id);
@@ -80,7 +85,6 @@ export class McpExternalManager {
 					}
 				} catch (err) {
 					const msg = err instanceof Error ? err.message : String(err);
-					this.errors.set(c.id, msg);
 					const status = this.statuses.get(c.id);
 					if (status) status.error = msg;
 				}
@@ -133,11 +137,13 @@ export class McpExternalManager {
 								: {};
 						const result = await client.callTool(tool.name, args);
 						if (result.isError) {
-							// Surface as a rejection — AgentHost tool-call hook
-							// audits failures, and the error message reaches the
-							// LLM so it can react (retry / give up / explain).
+							// Surface as a rejection with the remote's content
+							// summary so the LLM sees the actual reason (auth
+							// failure, argument validation, rate limit, etc.)
+							// and can retry / adjust / give up accordingly.
+							// AgentHost's audit hook records the throw too.
 							throw new Error(
-								`mcp-external '${client.id}' tool '${tool.remoteName}' returned isError:true`,
+								`mcp-external '${client.id}' tool '${tool.remoteName}' returned isError:true — ${summariseContent(result.content)}`,
 							);
 						}
 						return result.content;
@@ -165,6 +171,40 @@ export class McpExternalManager {
 		return Promise.race([p, timeoutP]).finally(() => {
 			if (timer) clearTimeout(timer);
 		});
+	}
+}
+
+/**
+ * Extract a terse human-readable reason from MCP `content` blocks.
+ * MCP content is an array of typed blocks ({type:"text", text:"..."}, ...).
+ * We pull the first text block, fall back to a JSON snapshot. Truncated to
+ * keep the thrown Error message manageable for logs and audit entries.
+ */
+const ISERROR_SUMMARY_MAX = 512;
+function summariseContent(content: unknown): string {
+	if (Array.isArray(content)) {
+		for (const block of content) {
+			if (
+				block &&
+				typeof block === "object" &&
+				"type" in block &&
+				(block as { type: unknown }).type === "text" &&
+				typeof (block as { text?: unknown }).text === "string"
+			) {
+				const text = (block as { text: string }).text;
+				return text.length > ISERROR_SUMMARY_MAX
+					? `${text.slice(0, ISERROR_SUMMARY_MAX)}…(truncated)`
+					: text;
+			}
+		}
+	}
+	try {
+		const j = JSON.stringify(content);
+		return j.length > ISERROR_SUMMARY_MAX
+			? `${j.slice(0, ISERROR_SUMMARY_MAX)}…(truncated)`
+			: j;
+	} catch {
+		return "<non-serialisable content>";
 	}
 }
 
