@@ -512,3 +512,88 @@ describe("SyncEngine dynamic transport", () => {
 		rmSync(tmp, { recursive: true, force: true });
 	});
 });
+
+describe("SyncEngine bookmark tombstones", () => {
+	it("pushNow emits tombstone items for deleted bookmarks", async () => {
+		const { engine, db, bookmarks, transport, tmp } = mkEngine();
+		const row = bookmarks.add({
+			url: "https://x/",
+			title: "X",
+			createdAt: 1,
+		});
+		await engine.configure("p");
+		await engine.pushNow();
+		// Initial push: 1 live bookmark.
+		const firstLen = transport.pushed.length;
+		expect(firstLen).toBe(1);
+
+		bookmarks.remove(row.id, { deletedAt: 50 });
+		await engine.pushNow();
+		const added = transport.pushed.slice(firstLen);
+		expect(added).toHaveLength(1);
+		const tomb = added[0];
+		expect(tomb?.kind).toBe("bookmark");
+		expect(tomb?.deletedAt).toBe(50);
+		expect(tomb?.updatedAt).toBe(50);
+		db.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("pullNow applies a peer tombstone: local row vanishes, no bounce", async () => {
+		// Device B starts with a local bookmark. Device A (peer) publishes a
+		// tombstone for the same (folder, url). After B pulls, the row must
+		// be gone AND B.pushNow must not re-emit a tombstone (otherwise we
+		// have an infinite delete ping-pong).
+		const { engine: B, db, bookmarks, transport, tmp } = mkEngine();
+		bookmarks.add({ url: "https://x/", title: "X", createdAt: 1 });
+		await B.configure("pass");
+
+		// Build A against a peer DB sharing the same sync config (= same key).
+		const peerDb = new AppDatabase(":memory:");
+		const peerBookmarks = new BookmarksStore(peerDb);
+		const peerRow = peerBookmarks.add({
+			url: "https://x/",
+			title: "X",
+			createdAt: 1,
+		});
+		peerBookmarks.remove(peerRow.id, { deletedAt: 50 });
+		const aTransport = new InMemoryTransport();
+		const fs = require("node:fs");
+		fs.writeFileSync(
+			path.join(tmp, "a.json"),
+			fs.readFileSync(path.join(tmp, "sync-config.json"), "utf-8"),
+		);
+		const A = new SyncEngine({
+			configStore: new SyncConfigStore(path.join(tmp, "a.json")),
+			bookmarks: peerBookmarks,
+			history: new HistoryStore(peerDb),
+			appDb: peerDb,
+			transport: aTransport,
+			deriveKeyFn: fastDerive,
+		});
+		expect(await A.unlock("pass")).toBe(true);
+		await A.pushNow();
+		// A's outbox contains exactly the tombstone (no live row — A deleted it).
+		const aTombstones = aTransport.pushed.filter(
+			(i) => i.kind === "bookmark" && i.deletedAt !== undefined,
+		);
+		expect(aTombstones).toHaveLength(1);
+
+		// Hand A's tombstone to B and pull.
+		transport.bookmarks = aTombstones;
+		const r = await B.pullNow();
+		expect(r.applied).toBeGreaterThanOrEqual(1);
+		expect(bookmarks.list().map((b) => b.url)).not.toContain("https://x/");
+		// No local tombstone was written (would cause a bounce-back).
+		expect(bookmarks.listTombstonesSince(0, 0, 10)).toEqual([]);
+
+		// Next B.pushNow should NOT re-emit a tombstone for this item.
+		const before = transport.pushed.length;
+		await B.pushNow();
+		const afterPush = transport.pushed.slice(before);
+		const newTombstones = afterPush.filter((i) => i.deletedAt !== undefined);
+		expect(newTombstones).toEqual([]);
+		db.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+});
