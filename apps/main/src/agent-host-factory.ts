@@ -42,6 +42,7 @@ import {
 	createRedactionPipelineFromPolicy,
 	type SensitiveWordFilter,
 } from "./redaction-pipeline.js";
+import { appendSoulToPrompt, type SoulProvider } from "./soul.js";
 import type { TabManager } from "./tab-manager.js";
 import type { TaskStateStore } from "./task-state.js";
 import {
@@ -72,6 +73,12 @@ export interface FactoryDeps {
 	taskStore?: TaskStateStore;
 	/** Optional P1 Stage 9 integration: resolves `{{vault:*}}` in tool args. */
 	vault?: AuthVault;
+	/**
+	 * Optional P2 §2.2 integration: appends the user's SOUL.md to the
+	 * system prompt after persona body. Undefined → no soul injection
+	 * (e.g. in unit tests that care only about tool wiring).
+	 */
+	soul?: SoulProvider;
 }
 
 export interface CreateAgentHostOpts {
@@ -165,7 +172,22 @@ export async function createAgentHostForTab(
 
 	const redaction: SensitiveWordFilter =
 		createRedactionPipelineFromPolicy(policy);
-	const finalSystemPrompt = appendPersonaBody(systemPrompt, persona.contentMd);
+	const afterPersona = appendPersonaBody(systemPrompt, persona.contentMd);
+	// SOUL is appended LAST so its boundaries/preferences override persona
+	// style (persona = "what role now", SOUL = "how I always want you to act").
+	//
+	// Fail-closed on read errors (security-high): FileSoulProvider already
+	// returns the default body for ENOENT, so any error bubbling up here
+	// means a configured SOUL file exists but cannot be read (EACCES,
+	// corrupted, oversize…). Silently dropping it would run the Agent
+	// without the user's declared hard boundaries — exactly the scenario
+	// the feature exists to prevent. Let it throw; the session fails to
+	// start, the user sees the cause and fixes the file.
+	let finalSystemPrompt = afterPersona;
+	if (deps.soul) {
+		const soulBody = await deps.soul.load();
+		finalSystemPrompt = appendSoulToPrompt(afterPersona, soulBody);
+	}
 
 	// If tool-result-storage is wired, add the meta-skill so the LLM can
 	// rehydrate spilled results on demand. The typed meta-skill widens to

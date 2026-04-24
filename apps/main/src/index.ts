@@ -51,6 +51,11 @@ import { ProfileStore } from "./profile-store.js";
 import { createRedactionPipelineFromPolicy } from "./redaction-pipeline.js";
 import { RoutinesEngine } from "./routines.js";
 import { createDefaultSlashRegistry } from "./slash-commands.js";
+import {
+	DEFAULT_SOUL_BODY,
+	FileSoulProvider,
+	type SoulProvider,
+} from "./soul.js";
 import { getAppDatabase } from "./storage/sqlite.js";
 import { SyncConfigStore } from "./sync-config.js";
 import { SyncEngine } from "./sync-engine.js";
@@ -128,6 +133,7 @@ interface OrchestratorDeps {
 	confirmation: ConfirmationHandler;
 	taskStore: TaskStateStore;
 	vault: AuthVault;
+	soul: SoulProvider;
 }
 
 /**
@@ -161,6 +167,7 @@ async function runOneTask(
 			confirmation: deps.confirmation,
 			taskStore: deps.taskStore,
 			vault: deps.vault,
+			soul: deps.soul,
 		},
 		{ tabId, persona: use },
 	);
@@ -352,6 +359,7 @@ interface WindowInfra {
 	confirmation: ConfirmationHandler;
 	slashRegistry: ReturnType<typeof createDefaultSlashRegistry>;
 	vault: AuthVault;
+	soul: SoulProvider;
 }
 
 function createWindowInfra(policy: PolicyProvider): WindowInfra {
@@ -386,6 +394,10 @@ function createWindowInfra(policy: PolicyProvider): WindowInfra {
 	const vault = new AuthVault({
 		filePath: path.join(userDataDir, "agent-browser", "vault.json"),
 	});
+	const soul = new FileSoulProvider({
+		path: path.join(userDataDir, "agent-browser", "soul.md"),
+		defaultBody: DEFAULT_SOUL_BODY,
+	});
 	return {
 		auditLog,
 		toolResultStorage,
@@ -393,6 +405,7 @@ function createWindowInfra(policy: PolicyProvider): WindowInfra {
 		confirmation,
 		slashRegistry,
 		vault,
+		soul,
 	};
 }
 
@@ -622,6 +635,7 @@ async function createMainWindow(
 		confirmation: infra.confirmation,
 		taskStore: infra.taskStore,
 		vault: infra.vault,
+		soul: infra.soul,
 	});
 	hostRef.get = () => orchestrator.getHost();
 
