@@ -74,6 +74,12 @@ export const AdminPolicySchema = z.object({
 		"fs_read",
 		"fs_write",
 		"fs_ls",
+		// Memory read-only tools (P2 §2.1). Write side stays off the
+		// default list until the confirmation-gated Agent-write lands;
+		// users can still edit CORE.md / daily files manually.
+		"memory_search",
+		"memory_read_core",
+		"memory_read_daily",
 	]),
 	allowedDomains: z.array(z.string()).default([]),
 	allowedUrlSchemes: z.array(UrlScheme).default(["http", "https"]),

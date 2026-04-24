@@ -34,6 +34,7 @@ import {
 	type TabController,
 	type TabInfo,
 } from "@agent-browser/browser-tools";
+import { z } from "zod";
 import type { AdminPolicy } from "./admin-policy.js";
 import {
 	AgentHost,
@@ -47,6 +48,7 @@ import type { AuthVault } from "./auth-vault.js";
 import type { ConfirmationHandler } from "./confirmation.js";
 import { createDefaultStreamFn } from "./llm/factory.js";
 import type { McpExternalManager } from "./mcp-external-manager.js";
+import type { MemoryStore } from "./memory.js";
 import type { Persona, PersonaManager } from "./persona-manager.js";
 import { renderTemplate } from "./prompts/render.js";
 import {
@@ -96,6 +98,15 @@ export interface FactoryDeps {
 	 * Undefined → Agent runs with only our own browser-tools.
 	 */
 	externalMcp?: McpExternalManager;
+	/**
+	 * Optional P2 §2.1 integration: two-layer memory (CORE.md +
+	 * daily/YYYY-MM-DD.md). When present, a CORE summary rides along in
+	 * the system prompt and `memory_search`/`memory_read_*` skills are
+	 * registered so the Agent can pull specific facts on demand. Write
+	 * skills are deliberately NOT exposed here — Agent-initiated writes
+	 * belong to a follow-up PR with confirmation + AuditLog wiring.
+	 */
+	memory?: MemoryStore;
 }
 
 export interface CreateAgentHostOpts {
@@ -180,6 +191,7 @@ export async function createAgentHostForTab(
 		dirname: (p) => path.dirname(p),
 		sep: path.sep,
 	});
+	const memorySkills = deps.memory ? createMemorySkills(deps.memory) : [];
 	const allSkills = [
 		...createBrowserToolsSkills(ctx),
 		...createTabsSkills({
@@ -187,6 +199,7 @@ export async function createAgentHostForTab(
 			policy: navigationPolicy,
 		}),
 		...fsSkills,
+		...memorySkills,
 		// External MCP tools go LAST so an externally-configured tool
 		// can never shadow a built-in by sharing its name — filterSkills
 		// later keeps only names in policy.allowedTools anyway.
@@ -207,7 +220,26 @@ export async function createAgentHostForTab(
 
 	const redaction: SensitiveWordFilter =
 		createRedactionPipelineFromPolicy(policy);
-	const afterPersona = appendPersonaBody(systemPrompt, persona.contentMd);
+	// Order at the prompt tail:
+	//   base prompt → persona body → CORE memory facts → SOUL behaviour
+	// Memory sits between persona (role-specific) and SOUL (user-wide
+	// behaviour) because CORE facts are factual scaffolding the LLM should
+	// read before applying SOUL's style rules to them.
+	let afterPersona = appendPersonaBody(systemPrompt, persona.contentMd);
+	if (deps.memory) {
+		try {
+			const core = await deps.memory.coreSummary();
+			if (core) {
+				afterPersona = `${afterPersona.trimEnd()}\n\n<!-- memory:core -->\n${core}\n<!-- memory:core:end -->\n`;
+			}
+		} catch (err) {
+			console.warn(
+				`[agent-host-factory] memory.coreSummary failed, continuing without CORE: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+			);
+		}
+	}
 	// SOUL is appended LAST so its boundaries/preferences override persona
 	// style (persona = "what role now", SOUL = "how I always want you to act").
 	//
@@ -532,6 +564,53 @@ const nodeFsDriver: FsDriver = {
 		return realpath(p);
 	},
 };
+
+/**
+ * Read-only Memory skills. Writes are NOT here — Agent self-write to
+ * persistent memory will ride through the same confirmation path that
+ * §2.2's SOUL.md auto-evolution uses when that ships.
+ */
+function createMemorySkills(memory: MemoryStore): Skill[] {
+	return [
+		{
+			name: "memory_search",
+			description:
+				"Search the user's memory (CORE.md + daily notes) for lines matching given keywords. Returns up to 10 hits with source/section/line. Keywords are AND-matched case-insensitively.",
+			inputSchema: z.object({
+				query: z.string().min(1),
+				limit: z.number().int().positive().max(50).optional(),
+			}),
+			execute: async (input) => {
+				const parsed = z
+					.object({
+						query: z.string().min(1),
+						limit: z.number().int().positive().max(50).optional(),
+					})
+					.parse(input);
+				return { hits: await memory.search(parsed.query, parsed.limit) };
+			},
+		},
+		{
+			name: "memory_read_core",
+			description:
+				"Read the full CORE.md — the user's permanent facts file. Use when the Agent needs comprehensive context at task start.",
+			inputSchema: z.object({}).passthrough(),
+			execute: async () => ({ content: await memory.readCore() }),
+		},
+		{
+			name: "memory_read_daily",
+			description:
+				"Read one day's notes file by ISO date (YYYY-MM-DD). Returns an empty string if that day has no entries.",
+			inputSchema: z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }),
+			execute: async (input) => {
+				const parsed = z
+					.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) })
+					.parse(input);
+				return { content: await memory.readDaily(parsed.date) };
+			},
+		},
+	];
+}
 
 export function isExternalMcpSkillName(name: string): boolean {
 	return name.includes("__");
