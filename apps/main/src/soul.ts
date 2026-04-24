@@ -19,6 +19,19 @@
 import { readFile, writeFile } from "node:fs/promises";
 
 /**
+ * Cap on SOUL.md size. Anything larger blows up LLM context cost and is
+ * almost certainly not a preferences file (someone pasted a document by
+ * mistake). 64KB is generous enough for thousands of preference lines
+ * while bounding memory + tokens — loadout fails closed with a clear
+ * error rather than silently smuggling a huge payload into every prompt.
+ */
+const SOUL_MAX_BYTES = 64 * 1024;
+
+/** Literal text of the trailing fence. Kept as a single source of truth so
+ * both the appender and the sanitiser agree. */
+const SOUL_END_FENCE = "<!-- soul:end -->";
+
+/**
  * Shipped default — written to disk on first launch so the user always has
  * a concrete file to edit. Kept inline (not loaded from a .md resource) so
  * the Electron build doesn't need a custom asset-copy step.
@@ -106,15 +119,28 @@ export class FileSoulProvider implements SoulProvider {
 	async load(): Promise<string> {
 		try {
 			const raw = await this.fs.readFile(this.path, "utf8");
+			if (raw.length > SOUL_MAX_BYTES) {
+				throw new Error(
+					`soul.md exceeds ${SOUL_MAX_BYTES} bytes (${raw.length})`,
+				);
+			}
 			return raw;
 		} catch (err) {
 			if (!isEnoent(err)) throw err;
 			if (this.seedOnMissing) {
 				try {
 					await this.fs.writeFile(this.path, this.defaultBody, "utf8");
-				} catch {
+				} catch (seedErr) {
 					// Non-fatal: caller still gets the default body below.
-					// A persistent write failure would surface next boot anyway.
+					// Surface the reason so the user can see why their
+					// `soul.md` wasn't created (e.g. parent dir missing,
+					// readonly fs). A silent failure here led to hours of
+					// "my edits don't apply" confusion in review.
+					console.warn(
+						`[soul] seed write failed at ${this.path}: ${
+							seedErr instanceof Error ? seedErr.message : String(seedErr)
+						}`,
+					);
 				}
 			}
 			return this.defaultBody;
@@ -128,12 +154,19 @@ export class FileSoulProvider implements SoulProvider {
  * whitespace body yields the original prompt unchanged.
  */
 export function appendSoulToPrompt(systemPrompt: string, soul: string): string {
-	const body = soul.trim();
+	// Defang any literal `<!-- soul:end -->` inside the user's body so the
+	// outer fence can't be closed prematurely. A malicious or accidental
+	// "</soul>" inside preferences would otherwise corrupt audit tooling
+	// that scans for the fence boundary and, worst case, let content after
+	// the injection point be interpreted as post-SOUL prompt.
+	const body = soul
+		.trim()
+		.replace(/<!-- soul:end -->/g, "<!-- soul:end-escaped -->");
 	if (body === "") return systemPrompt;
 	// Explicit fence is belt-and-braces: the LLM can already see the section
 	// header, but a machine-readable boundary helps future tooling (audit
 	// diffing, structured redaction) locate SOUL without parsing markdown.
-	return `${systemPrompt}\n\n<!-- soul:start -->\n${body}\n<!-- soul:end -->\n`;
+	return `${systemPrompt}\n\n<!-- soul:start -->\n${body}\n${SOUL_END_FENCE}\n`;
 }
 
 function isEnoent(err: unknown): boolean {
