@@ -216,4 +216,24 @@ describe("tabs skills", () => {
 		)) as TabsWaitLoadResult;
 		expect(res.ok).toBe(true);
 	});
+
+	it("tabs_wait_load distinguishes not_found from timeout when tab vanishes", async () => {
+		const c = fakeController({
+			initialActive: "a",
+			waitLoadResult: "not_found",
+		});
+		c.tabs.set("a", {
+			id: "a",
+			url: "x",
+			title: "",
+			openedByAgent: true,
+			agentActive: true,
+		});
+		const skills = createTabsSkills({ controller: c });
+		const res = (await getSkill(skills, "tabs_wait_load").execute({
+			tabId: "a",
+		})) as TabsWaitLoadResult;
+		expect(res.ok).toBe(false);
+		if (!res.ok) expect(res.reason).toBe("not_found");
+	});
 });

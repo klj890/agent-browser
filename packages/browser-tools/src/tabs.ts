@@ -55,7 +55,7 @@ export interface TabController {
 	waitLoad(
 		id: string,
 		timeoutMs: number,
-	): Promise<"idle" | "timeout" | "crashed">;
+	): Promise<"idle" | "timeout" | "crashed" | "not_found">;
 }
 
 export const TabsListInput = z.object({}).passthrough();

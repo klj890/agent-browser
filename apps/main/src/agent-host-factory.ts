@@ -314,7 +314,7 @@ function hashArgs(args: unknown): string {
  * tabs it opened; switching does not steal user foreground) before handing
  * off to TabManager.
  */
-function createTabControllerForAgent(
+export function createTabControllerForAgent(
 	tabManager: TabManager,
 	activeAgentTab: { id: string },
 ): TabController {
@@ -343,6 +343,16 @@ function createTabControllerForAgent(
 		},
 		close(id) {
 			tabManager.close(id);
+			// If we just closed the tab the Agent was logically "on", re-anchor
+			// to a surviving tab so subsequent snapshot/act don't hit a dangling
+			// CDP getter. Prefer another Agent-owned tab when possible (keeps the
+			// Agent's working set coherent); otherwise fall back to any remaining
+			// tab. Empty list is fine — next tool call will surface the error.
+			if (activeAgentTab.id === id) {
+				const remaining = tabManager.list();
+				const fallback = remaining.find((t) => t.openedByAgent) ?? remaining[0];
+				if (fallback) activeAgentTab.id = fallback.id;
+			}
 		},
 		canClose(id) {
 			const tab = tabManager.list().find((t) => t.id === id);
@@ -363,7 +373,10 @@ function createTabControllerForAgent(
 				const start = Date.now();
 				const poll = () => {
 					const tab = tabManager.list().find((t) => t.id === id);
-					if (!tab) return resolve("timeout");
+					// Tab vanished mid-poll (closed by user / crashed-and-cleaned):
+					// surface a distinct "not_found" so the Agent can decide
+					// whether to retry or give up, rather than conflate with timeout.
+					if (!tab) return resolve("not_found");
 					if (tab.state === "idle") return resolve("idle");
 					if (tab.state === "crashed") return resolve("crashed");
 					if (Date.now() - start >= timeoutMs) return resolve("timeout");
