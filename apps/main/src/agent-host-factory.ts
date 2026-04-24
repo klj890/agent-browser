@@ -440,16 +440,20 @@ export function createTabControllerForAgent(
 /**
  * Tool names of the form `<prefix>__<remote>` are externally-defined
  * (P2 §2.6 MCP client) — configured out-of-band by the user, not enumerable
- * in AdminPolicy.allowedTools. We allow them through the policy gate but
- * still honour persona.allowedTools so a narrowly-scoped persona
- * (e.g. "read-only research") can opt out.
- *
- * The double-underscore separator comes from McpExternalClient; anyone
- * naming a first-party tool with `__` would collide on purpose and should
- * not be doing that.
+ * in AdminPolicy.allowedTools. The separator is `__`; first-party tools
+ * that need an underscore use a single one (e.g. `tabs_open`).
  */
 export function isExternalMcpSkillName(name: string): boolean {
 	return name.includes("__");
+}
+
+/**
+ * Extract the server-prefix portion of an external tool name. Returns
+ * undefined when the name isn't external. `gh__star_repo` → `"gh"`.
+ */
+export function externalMcpPrefixOf(name: string): string | undefined {
+	const i = name.indexOf("__");
+	return i > 0 ? name.slice(0, i) : undefined;
 }
 
 function filterSkills(
@@ -461,8 +465,22 @@ function filterSkills(
 	const personaAllowed = persona.frontmatter.allowedTools
 		? new Set(persona.frontmatter.allowedTools)
 		: null;
+	// External prefix allowlist: undefined = accept-all (opt-in), [] = block-all,
+	// ["gh", "slack"] = only those prefixes. See AdminPolicy doc.
+	const externalAllowed =
+		policy.allowedExternalMcpPrefixes != null
+			? new Set(policy.allowedExternalMcpPrefixes)
+			: null; // null sentinel → unrestricted
 	return all.filter((s) => {
-		if (!policyAllowed.has(s.name) && !isExternalMcpSkillName(s.name)) {
+		if (isExternalMcpSkillName(s.name)) {
+			// External tool: policy.allowedTools is bypassed (admin can't
+			// enumerate external tool names), but the prefix allowlist
+			// still applies when admin has opted in.
+			if (externalAllowed) {
+				const prefix = externalMcpPrefixOf(s.name);
+				if (prefix == null || !externalAllowed.has(prefix)) return false;
+			}
+		} else if (!policyAllowed.has(s.name)) {
 			return false;
 		}
 		if (personaAllowed && !personaAllowed.has(s.name)) return false;

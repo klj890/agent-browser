@@ -102,14 +102,33 @@ describe("ExternalMcpConfigFileStore", () => {
 		expect(store.load()).toEqual(DEFAULT_EXTERNAL_MCP_CONFIG);
 	});
 
-	it("returns DEFAULT when file has valid JSON but wrong schema", () => {
+	it("returns DEFAULT when outer JSON shape is wrong (no servers array)", () => {
+		writeFileSync(file, JSON.stringify({ notServers: [] }), "utf8");
+		const store = new ExternalMcpConfigFileStore(file);
+		expect(store.load()).toEqual(DEFAULT_EXTERNAL_MCP_CONFIG);
+	});
+
+	it("per-entry filter: drops invalid rows, keeps valid ones", () => {
 		writeFileSync(
 			file,
-			JSON.stringify({ servers: [{ id: 123, transport: "stdio" }] }),
+			JSON.stringify({
+				servers: [
+					{ id: 123, transport: "stdio" }, // invalid: bad id + bad transport
+					{
+						id: "good",
+						name: "Good",
+						transport: "http",
+						url: "https://mcp.example.com",
+					},
+					{ id: "nourl" }, // invalid: missing required fields
+				],
+			}),
 			"utf8",
 		);
 		const store = new ExternalMcpConfigFileStore(file);
-		expect(store.load()).toEqual(DEFAULT_EXTERNAL_MCP_CONFIG);
+		const cfg = store.load();
+		expect(cfg.servers).toHaveLength(1);
+		expect(cfg.servers[0]?.id).toBe("good");
 	});
 
 	it("save() rejects invalid config before touching disk", () => {

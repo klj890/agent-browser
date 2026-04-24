@@ -50,6 +50,17 @@ export class McpExternalManager {
 		this.clientFactory =
 			deps.clientFactory ?? ((spec) => new McpExternalClient({ spec }));
 		for (const spec of deps.servers) {
+			if (this.specById.has(spec.id)) {
+				// Duplicate id in config: we keep the FIRST and ignore the rest
+				// because the per-server timeout / prefix / token differs and
+				// overwriting would silently reshape behaviour. Warn so the
+				// user can fix the config file.
+				console.warn(
+					`[mcp-external] duplicate server id '${spec.id}' ignored; ` +
+						"remove the later entry from mcp-clients.json",
+				);
+				continue;
+			}
 			this.specById.set(spec.id, spec);
 			this.statuses.set(spec.id, {
 				id: spec.id,
@@ -209,10 +220,12 @@ function summariseContent(content: unknown): string {
 }
 
 /**
- * Prepend the remote tool's JSON Schema to the description so the LLM can
+ * Append the remote tool's JSON Schema to the description so the LLM can
  * read it and emit well-typed args even though our Skill-level Zod is a
- * permissive passthrough. Truncates large schemas to avoid blowing up the
- * prompt — any useful MCP tool's schema fits in 1KB.
+ * permissive passthrough. For schemas that fit under the char budget we
+ * inline the whole JSON; for oversize ones we degrade to a valid summary
+ * (property names + types) rather than a string-truncated — and therefore
+ * syntactically invalid — JSON blob that LLMs may hallucinate around.
  */
 const SCHEMA_MAX_CHARS = 1024;
 function embedSchemaInDescription(base: string, schema: unknown): string {
@@ -223,8 +236,35 @@ function embedSchemaInDescription(base: string, schema: unknown): string {
 	} catch {
 		return base;
 	}
-	if (serialised.length > SCHEMA_MAX_CHARS) {
-		serialised = `${serialised.slice(0, SCHEMA_MAX_CHARS)}…(truncated)`;
+	if (serialised.length <= SCHEMA_MAX_CHARS) {
+		return `${base}\n\nArguments schema (JSON Schema):\n${serialised}`;
 	}
-	return `${base}\n\nArguments schema (JSON Schema):\n${serialised}`;
+	// Oversize schema — fall back to a human-readable summary so we never
+	// put truncated (invalid) JSON in the prompt.
+	const summary = summariseSchema(schema);
+	return `${base}\n\nArguments schema (summary — full JSON omitted, >${SCHEMA_MAX_CHARS} chars):\n${summary}`;
+}
+
+function summariseSchema(schema: unknown): string {
+	if (!schema || typeof schema !== "object") return "<opaque>";
+	const s = schema as {
+		type?: unknown;
+		properties?: Record<string, { type?: unknown; description?: unknown }>;
+		required?: unknown;
+	};
+	const lines: string[] = [];
+	if (typeof s.type === "string") lines.push(`type: ${s.type}`);
+	if (s.properties && typeof s.properties === "object") {
+		const required = Array.isArray(s.required)
+			? new Set(s.required.map(String))
+			: new Set<string>();
+		lines.push("properties:");
+		for (const [key, val] of Object.entries(s.properties)) {
+			const typeStr =
+				val && typeof val.type === "string" ? val.type : "unknown";
+			const req = required.has(key) ? " (required)" : "";
+			lines.push(`  - ${key}: ${typeStr}${req}`);
+		}
+	}
+	return lines.join("\n") || "<opaque>";
 }

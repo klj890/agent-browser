@@ -163,10 +163,21 @@ export class McpExternalClient {
 						"npm package and assign it to globalThis.EventSource before boot.",
 				);
 			}
+			// Standard WHATWG EventSourceInit has no `headers` field, but the
+			// `eventsource` npm polyfill (and nodejs 22+ native) accept one.
+			// Pass the Authorization through BOTH channels — the SSE stream
+			// GET and the POST return-channel — so servers that authenticate
+			// the stream connection itself (common in hosted MCP gateways)
+			// don't reject us. Cast through `unknown` because the SDK types
+			// stick to the narrow WHATWG shape.
+			const eventSourceInit: Record<string, unknown> = {
+				fetch: this.fetchImpl,
+			};
+			if (this.spec.authorization) {
+				eventSourceInit.headers = { Authorization: this.spec.authorization };
+			}
 			return new SSEClientTransport(new URL(this.spec.url), {
-				// SSE transport uses eventSourceInit for stream setup; auth
-				// header comes via requestInit for the POST channel.
-				eventSourceInit: { fetch: this.fetchImpl as unknown as typeof fetch },
+				eventSourceInit: eventSourceInit as unknown as EventSourceInit,
 				requestInit,
 			});
 		}

@@ -62,17 +62,28 @@ export class ExternalMcpConfigFileStore implements ExternalMcpConfigStore {
 
 	load(): ExternalMcpConfig {
 		if (!existsSync(this.filePath)) return { ...DEFAULT_EXTERNAL_MCP_CONFIG };
+		let parsed: unknown;
 		try {
-			const raw = readFileSync(this.filePath, "utf-8");
-			const parsed = ExternalMcpConfigSchema.safeParse(JSON.parse(raw));
-			// On schema failure we prefer "run without external MCP" over
-			// "refuse to boot". A single bad row shouldn't break the Agent —
-			// the UI layer surfaces the validation error separately.
-			if (!parsed.success) return { ...DEFAULT_EXTERNAL_MCP_CONFIG };
-			return parsed.data;
+			parsed = JSON.parse(readFileSync(this.filePath, "utf-8"));
 		} catch {
 			return { ...DEFAULT_EXTERNAL_MCP_CONFIG };
 		}
+		if (
+			!parsed ||
+			typeof parsed !== "object" ||
+			!Array.isArray((parsed as { servers?: unknown }).servers)
+		) {
+			return { ...DEFAULT_EXTERNAL_MCP_CONFIG };
+		}
+		// Per-entry validation: a single bad row must not sink every other
+		// correctly-configured server. We accept everything that parses and
+		// silently drop the rest; the UI-facing config editor will flag
+		// invalid entries separately (not in this PR).
+		const servers = ((parsed as { servers: unknown[] }).servers ?? [])
+			.map((s) => ExternalMcpServerSchema.safeParse(s))
+			.filter((r): r is Extract<typeof r, { success: true }> => r.success)
+			.map((r) => r.data);
+		return { servers };
 	}
 
 	save(cfg: ExternalMcpConfig): void {

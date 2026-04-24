@@ -188,6 +188,79 @@ describe("McpExternalManager", () => {
 		await expect(skill?.execute({})).rejects.toThrow(/rate limited/);
 	});
 
+	it("duplicate server id in config: keeps first, warns, ignores later", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const factory = vi.fn(
+				(s: ExternalMcpServer) => new FakeClient({ id: s.id }),
+			);
+			const mgr = new McpExternalManager({
+				servers: [
+					spec("dup", { name: "first" }),
+					spec("dup", { name: "second" }),
+				],
+				clientFactory: factory as unknown as ConstructorParameters<
+					typeof McpExternalManager
+				>[0]["clientFactory"],
+			});
+			await mgr.start();
+			expect(factory).toHaveBeenCalledTimes(1);
+			expect(mgr.status()).toHaveLength(1);
+			expect(mgr.status()[0]?.name).toBe("first");
+			expect(warn).toHaveBeenCalledWith(expect.stringMatching(/duplicate/));
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("oversize JSON Schema → description falls back to valid summary (not truncated JSON)", async () => {
+		// Build a schema whose JSON exceeds 1KB so the truncate branch fires.
+		const bigProps: Record<string, { type: string; description: string }> = {};
+		for (let i = 0; i < 200; i++) {
+			bigProps[`field_${i}`] = {
+				type: "string",
+				description: "x".repeat(40),
+			};
+		}
+		const fatSchema = {
+			type: "object",
+			properties: bigProps,
+			required: ["field_0"],
+		};
+		const fatClient = {
+			id: "fat",
+			prefix: () => "fat",
+			isConnected: () => true,
+			listTools: (): McpRemoteTool[] => [
+				{
+					name: "fat__do",
+					remoteName: "do",
+					description: "Fat tool",
+					inputSchema: fatSchema,
+				},
+			],
+			connect: async () => {},
+			callTool: async (): Promise<McpCallResult> => ({
+				content: [],
+				isError: false,
+			}),
+			disconnect: async () => {},
+		};
+		const mgr = new McpExternalManager({
+			servers: [spec("fat")],
+			clientFactory: (() =>
+				fatClient as unknown as import("../mcp-external-client.js").McpExternalClient) as unknown as ConstructorParameters<
+				typeof McpExternalManager
+			>[0]["clientFactory"],
+		});
+		await mgr.start();
+		const desc = mgr.skills()[0]?.description ?? "";
+		expect(desc).toContain("summary");
+		expect(desc).toContain("field_0: string (required)");
+		// Crucially: no syntactically-broken JSON in the description.
+		expect(desc).not.toMatch(/…\(truncated\)/);
+	});
+
 	it("start() respects per-server timeoutMs from spec (not just default)", async () => {
 		const slow = new FakeClient({
 			id: "slow",
@@ -303,5 +376,23 @@ describe("isExternalMcpSkillName", () => {
 		expect(isExternalMcpSkillName("act")).toBe(false);
 		expect(isExternalMcpSkillName("tabs_open")).toBe(false); // single underscore
 		expect(isExternalMcpSkillName("tabs_wait_load")).toBe(false);
+	});
+});
+
+describe("externalMcpPrefixOf", () => {
+	it("extracts prefix up to the first `__`", async () => {
+		const { externalMcpPrefixOf } = await import("../agent-host-factory.js");
+		expect(externalMcpPrefixOf("gh__star_repo")).toBe("gh");
+		expect(externalMcpPrefixOf("klavis-main__send_mail")).toBe("klavis-main");
+		// Extra `__` inside the remote name still splits on the first.
+		expect(externalMcpPrefixOf("gh__do__thing")).toBe("gh");
+	});
+
+	it("returns undefined for non-external names", async () => {
+		const { externalMcpPrefixOf } = await import("../agent-host-factory.js");
+		expect(externalMcpPrefixOf("snapshot")).toBeUndefined();
+		expect(externalMcpPrefixOf("tabs_open")).toBeUndefined();
+		// Leading `__` (empty prefix) should NOT match — we require > 0.
+		expect(externalMcpPrefixOf("__nothing")).toBeUndefined();
 	});
 });
