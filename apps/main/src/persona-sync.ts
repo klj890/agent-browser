@@ -47,13 +47,17 @@ export class PersonaCache {
 	constructor(private readonly appDb: AppDatabase) {}
 
 	list(): Persona[] {
+		// ORDER BY last_updated ASC so that when two sources publish the
+		// same slug, PersonaManager.upsert (which does a forward for-of
+		// into bySlug.set) ends up with the *newest* row last — "last
+		// writer wins" on slug collisions means "latest wins".
 		const rows = this.appDb.db
 			.prepare(
 				`SELECT pc.slug, pc.name, pc.description, pc.domains_json, pc.allowed_tools_json,
 				        pc.content_md, pc.source_id, ps.name AS source_name, ps.kind AS source_kind
 				 FROM personas_cache pc
 				 LEFT JOIN persona_sources ps ON ps.id = pc.source_id
-				 ORDER BY pc.last_updated DESC`,
+				 ORDER BY pc.last_updated ASC`,
 			)
 			.all() as CacheRow[];
 		return rows.map(rowToPersona);
@@ -75,17 +79,19 @@ export class PersonaCache {
 
 	upsertMany(items: RemotePersona[], sourceId: string): void {
 		const db = this.appDb.db;
+		// Composite PK (source_id, slug): two sources publishing the same
+		// slug keep separate rows. ON CONFLICT only fires when the SAME
+		// source re-publishes a slug, which is the only real "update" case.
 		const stmt = db.prepare(
-			`INSERT INTO personas_cache (slug, name, description, domains_json, allowed_tools_json, content_md, last_updated, source_id)
-			 VALUES (@slug, @name, @description, @domains_json, @allowed_tools_json, @content_md, @last_updated, @source_id)
-			 ON CONFLICT(slug) DO UPDATE SET
+			`INSERT INTO personas_cache (source_id, slug, name, description, domains_json, allowed_tools_json, content_md, last_updated)
+			 VALUES (@source_id, @slug, @name, @description, @domains_json, @allowed_tools_json, @content_md, @last_updated)
+			 ON CONFLICT(source_id, slug) DO UPDATE SET
 				name = excluded.name,
 				description = excluded.description,
 				domains_json = excluded.domains_json,
 				allowed_tools_json = excluded.allowed_tools_json,
 				content_md = excluded.content_md,
-				last_updated = excluded.last_updated,
-				source_id = excluded.source_id`,
+				last_updated = excluded.last_updated`,
 		);
 		const tx = db.transaction((rows: RemotePersona[]) => {
 			for (const r of rows) {

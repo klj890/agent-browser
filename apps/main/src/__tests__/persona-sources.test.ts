@@ -232,6 +232,94 @@ describe("syncPersonasFromAllSources", () => {
 		db.close();
 	});
 
+	it("same slug from two sources coexists in cache; newest wins in PM", async () => {
+		const db = mkDb();
+		const sources = new PersonaSourceStore(db);
+		sources.upsert({
+			id: "team",
+			name: "Team",
+			url: "https://team",
+			kind: "team",
+			token: "t",
+		});
+		sources.upsert({
+			id: "pub",
+			name: "Public",
+			url: "https://pub",
+			kind: "public",
+		});
+		const pm = new PersonaManager();
+		const fetchImpl = vi.fn(async (url: string) => {
+			if (String(url).startsWith("https://team")) {
+				return {
+					ok: true,
+					json: async () => [
+						{
+							...remote("assistant", ["team.com"]),
+							description: "team copy",
+							lastUpdated: 100,
+						},
+					],
+				} as Response;
+			}
+			return {
+				ok: true,
+				json: async () => [
+					{
+						...remote("assistant", ["pub.com"]),
+						description: "public copy",
+						lastUpdated: 200,
+					},
+				],
+			} as Response;
+		}) as unknown as typeof fetch;
+		await syncPersonasFromAllSources({
+			appDb: db,
+			personaManager: pm,
+			sources,
+			fetchImpl,
+		});
+		const cache = new PersonaCache(db);
+		// Both rows coexist in the cache — no overwrite.
+		expect(cache.listBySource("team")).toHaveLength(1);
+		expect(cache.listBySource("pub")).toHaveLength(1);
+		// PM picks the newer row on slug collision.
+		const picked = pm.getBySlug("assistant");
+		expect(picked?.description).toBe("public copy");
+		expect(picked?.source?.id).toBe("pub");
+		db.close();
+	});
+
+	it("per-source since cursor is not contaminated by another source's writes", async () => {
+		const db = mkDb();
+		const sources = new PersonaSourceStore(db);
+		sources.upsert({ id: "a", name: "A", url: "https://a", kind: "team" });
+		sources.upsert({ id: "b", name: "B", url: "https://b", kind: "team" });
+		const pm = new PersonaManager();
+		const fetchImpl = vi.fn(async (url: string) => {
+			if (String(url).startsWith("https://a")) {
+				return {
+					ok: true,
+					json: async () => [{ ...remote("p"), lastUpdated: 500 }],
+				} as Response;
+			}
+			return {
+				ok: true,
+				json: async () => [{ ...remote("p"), lastUpdated: 900 }],
+			} as Response;
+		}) as unknown as typeof fetch;
+		await syncPersonasFromAllSources({
+			appDb: db,
+			personaManager: pm,
+			sources,
+			fetchImpl,
+		});
+		const cache = new PersonaCache(db);
+		expect(cache.lastUpdatedForSource("a")).toBe(500);
+		expect(cache.lastUpdatedForSource("b")).toBe(900);
+		db.close();
+	});
+
 	it("disabled source is skipped", async () => {
 		const db = mkDb();
 		const sources = new PersonaSourceStore(db);
