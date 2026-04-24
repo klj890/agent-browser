@@ -150,6 +150,38 @@ describe("TabManager", () => {
 		expect(tm.list().find((t) => t.id === id)?.state).toBe("crashed");
 	});
 
+	it("did-fail-load on main frame flips state → crashed and notifies listeners", () => {
+		const { tm, views } = setup();
+		const id = tm.create("https://broken.example.com");
+		const view = views[0];
+		expect(view).toBeDefined();
+		if (!view) return;
+		const events: string[] = [];
+		tm.addTabEventListener(id, (e) => events.push(e));
+		// Electron signature: (event, errorCode, errorDescription, validatedURL, isMainFrame, ...)
+		view._emit("did-fail-load", null, -105, "ERR_NAME_NOT_RESOLVED", "", true);
+		expect(tm.getSummary(id)?.state).toBe("crashed");
+		expect(events).toContain("state-changed");
+	});
+
+	it("did-fail-load on sub-frame does not change state (noise from ads/iframes)", () => {
+		const { tm, views } = setup();
+		const id = tm.create("https://ok.example.com");
+		const view = views[0];
+		if (!view) return;
+		view._emit("did-fail-load", null, -105, "ERR_NAME_NOT_RESOLVED", "", false);
+		expect(tm.getSummary(id)?.state).toBe("loading"); // unchanged
+	});
+
+	it("did-fail-load with ERR_ABORTED (-3) is ignored (user cancelled navigation)", () => {
+		const { tm, views } = setup();
+		const id = tm.create("https://ok.example.com");
+		const view = views[0];
+		if (!view) return;
+		view._emit("did-fail-load", null, -3, "ERR_ABORTED", "", true);
+		expect(tm.getSummary(id)?.state).toBe("loading");
+	});
+
 	it("navigate() re-loads the url on an existing tab", () => {
 		const { tm, views } = setup();
 		const id = tm.create("https://a.example.com");

@@ -590,6 +590,19 @@ export class TabManager {
 			tab.state = "crashed";
 			this.emitTabEvent(tab.id, "state-changed");
 		});
+		// DNS/network failures fire did-fail-load instead of did-finish-load,
+		// so without this handler the tab sits in `loading` until waitLoad's
+		// full timeout expires. Only react to main-frame failures; sub-frame
+		// failures (ads, third-party iframes) are noise. errorCode === -3 is
+		// ERR_ABORTED — the user/app navigated away mid-load, expected.
+		wc.on("did-fail-load", (..._args: unknown[]) => {
+			const errorCode = _args[1];
+			const isMainFrame = _args[4];
+			if (isMainFrame !== true) return;
+			if (errorCode === -3) return;
+			tab.state = "crashed";
+			this.emitTabEvent(tab.id, "state-changed");
+		});
 	}
 
 	private detachActive(): void {
