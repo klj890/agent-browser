@@ -362,6 +362,45 @@ describe("syncPersonasFromAllSources", () => {
 		db.close();
 	});
 
+	it("disabling a source hides its cached personas from cache.list and PM on next sync", async () => {
+		const db = mkDb();
+		const sources = new PersonaSourceStore(db);
+		sources.upsert({ id: "s", name: "S", url: "https://s", kind: "team" });
+		const pm = new PersonaManager();
+		const fetchImpl = vi.fn(async () => {
+			return { ok: true, json: async () => [remote("hidden")] } as Response;
+		}) as unknown as typeof fetch;
+		await syncPersonasFromAllSources({
+			appDb: db,
+			personaManager: pm,
+			sources,
+			fetchImpl,
+		});
+		expect(pm.getBySlug("hidden")).toBeDefined();
+		// Toggle off without removing — cache row stays, but list() must filter it out.
+		sources.setEnabled("s", false);
+		const cache = new PersonaCache(db);
+		expect(cache.listBySource("s")).toHaveLength(1); // row preserved
+		expect(cache.list()).toHaveLength(0); // filtered out via WHERE ps.enabled
+		await syncPersonasFromAllSources({
+			appDb: db,
+			personaManager: pm,
+			sources,
+			fetchImpl,
+		});
+		expect(pm.getBySlug("hidden")).toBeUndefined();
+		// Re-enable: sync again and the persona comes back without re-fetch
+		sources.setEnabled("s", true);
+		await syncPersonasFromAllSources({
+			appDb: db,
+			personaManager: pm,
+			sources,
+			fetchImpl,
+		});
+		expect(pm.getBySlug("hidden")).toBeDefined();
+		db.close();
+	});
+
 	it("disabled source is skipped", async () => {
 		const db = mkDb();
 		const sources = new PersonaSourceStore(db);

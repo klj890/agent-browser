@@ -50,14 +50,23 @@ export class PersonaCache {
 		// ORDER BY last_updated ASC so that when two sources publish the
 		// same slug, PersonaManager.upsert (which does a forward for-of
 		// into bySlug.set) ends up with the *newest* row last — "last
-		// writer wins" on slug collisions means "latest wins".
+		// writer wins" on slug collisions means "latest wins". Secondary
+		// key source_id ASC gives deterministic tie-breaking when two
+		// sources carry identical timestamps (otherwise SQLite order is
+		// implementation-defined).
+		// WHERE ps.enabled IS NULL OR ps.enabled = 1: skip rows belonging
+		// to a disabled source so the user's "toggle off" takes effect
+		// without waiting for an explicit unsubscribe. IS NULL covers the
+		// case where source_id has no matching persona_sources row (legacy
+		// 'default' personas migrated from pre-P2-19 deployments).
 		const rows = this.appDb.db
 			.prepare(
 				`SELECT pc.slug, pc.name, pc.description, pc.domains_json, pc.allowed_tools_json,
 				        pc.content_md, pc.source_id, ps.name AS source_name, ps.kind AS source_kind
 				 FROM personas_cache pc
 				 LEFT JOIN persona_sources ps ON ps.id = pc.source_id
-				 ORDER BY pc.last_updated ASC`,
+				 WHERE ps.enabled IS NULL OR ps.enabled = 1
+				 ORDER BY pc.last_updated ASC, pc.source_id ASC`,
 			)
 			.all() as CacheRow[];
 		return rows.map(rowToPersona);
@@ -253,9 +262,12 @@ async function fetchFromSource(
 	timeoutMs: number,
 ): Promise<RemotePersona[]> {
 	const since = cache.lastUpdatedForSource(src.id);
-	const url = `${src.url.replace(/\/$/, "")}/api/personas${
-		since > 0 ? `?since=${since}` : ""
-	}`;
+	// Use the URL API so an admin-configured `src.url` with a trailing
+	// slash, or one that already carries query parameters, doesn't produce
+	// a malformed request. searchParams.set also handles encoding for us.
+	const urlObj = new URL(`${src.url.replace(/\/$/, "")}/api/personas`);
+	if (since > 0) urlObj.searchParams.set("since", String(since));
+	const url = urlObj.toString();
 	const ctrl = new AbortController();
 	const t = setTimeout(() => ctrl.abort(), timeoutMs);
 	const headers: Record<string, string> = { Accept: "application/json" };
