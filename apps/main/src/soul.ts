@@ -164,14 +164,15 @@ export class FileSoulProvider implements SoulProvider {
  * whitespace body yields the original prompt unchanged.
  */
 export function appendSoulToPrompt(systemPrompt: string, soul: string): string {
-	// Defang any literal `<!-- soul:end -->` inside the user's body so the
-	// outer fence can't be closed prematurely. A malicious or accidental
-	// "</soul>" inside preferences would otherwise corrupt audit tooling
-	// that scans for the fence boundary and, worst case, let content after
-	// the injection point be interpreted as post-SOUL prompt.
+	// Defang any literal `soul:start` / `soul:end` fence tokens inside the
+	// user's body so the outer fence can't be closed prematurely or a fake
+	// inner section injected. Accept whitespace variants (`<!--soul:end-->`,
+	// `<!--  soul:end  -->`, etc.) because downstream audit tooling scans
+	// loosely; matching only the canonical spelling would leave an escape.
 	const body = soul
 		.trim()
-		.replace(/<!-- soul:end -->/g, "<!-- soul:end-escaped -->");
+		.replace(/<!--\s*soul:start\s*-->/g, "<!-- soul:start-escaped -->")
+		.replace(/<!--\s*soul:end\s*-->/g, "<!-- soul:end-escaped -->");
 	if (body === "") return systemPrompt;
 	// trimEnd() on the prompt so appendPersonaBody's trailing "\n" doesn't
 	// compound with our "\n\n" into a run of three blank lines. Explicit

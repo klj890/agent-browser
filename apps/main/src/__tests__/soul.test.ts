@@ -31,6 +31,22 @@ describe("appendSoulToPrompt", () => {
 		expect(out).toContain("<!-- soul:end-escaped -->");
 	});
 
+	it("defangs whitespace variants and fake soul:start tokens too", () => {
+		const tricky = [
+			"<!--soul:end-->",
+			"<!--  soul:end  -->",
+			"<!-- soul:start -->",
+			"<!--soul:start-->",
+		].join("\n");
+		const out = appendSoulToPrompt("base", tricky);
+		// Only the outer real fence should remain.
+		expect((out.match(/<!--\s*soul:end\s*-->/g) ?? []).length).toBe(1);
+		expect((out.match(/<!--\s*soul:start\s*-->/g) ?? []).length).toBe(1);
+		// User-supplied tokens all rewritten.
+		expect(out).toContain("<!-- soul:start-escaped -->");
+		expect(out).toContain("<!-- soul:end-escaped -->");
+	});
+
 	it("trims trailing whitespace on the prompt to avoid triple-newline between persona and soul", () => {
 		// Simulate the appendPersonaBody output ending with "\n" (as it does).
 		const promptWithTrailingNewline = "base\npersona stuff\n";
