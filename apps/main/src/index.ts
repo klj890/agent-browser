@@ -57,7 +57,11 @@ import { SyncEngine } from "./sync-engine.js";
 import { HttpSyncTransport, NoopSyncTransport } from "./sync-transport-http.js";
 import type { TabManager as TabManagerType } from "./tab-manager.js";
 import { TabManager } from "./tab-manager.js";
-import { isTerminalTaskStatus, TaskStateStore } from "./task-state.js";
+import {
+	isTerminalTaskStatus,
+	TaskStateStore,
+	type TaskStatus,
+} from "./task-state.js";
 import { ToolResultStorage } from "./tool-result-storage.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -287,34 +291,36 @@ function createOrchestrator(deps: OrchestratorDeps): AgentOrchestrator & {
 					);
 				}
 			}
-			// If already terminal (fast path), don't bother subscribing.
-			const current = deps.taskStore.get(taskId);
-			if (isTerminalTaskStatus(current.status)) {
-				return {
-					taskId,
-					endReason: current.status as
-						| "completed"
-						| "failed"
-						| "killed"
-						| "budget_exceeded",
-					durationMs: Date.now() - startedAt,
-				};
-			}
+			// Subscribe BEFORE checking current status. Otherwise a terminal
+			// transition landing between `.get()` and `onChange()` would be
+			// missed (onChange only fires on new transitions, not on the
+			// current state) and the promise would hang forever.
 			return await new Promise((resolve) => {
-				const unsub = deps.taskStore.onChange((task) => {
-					if (task.id !== taskId) return;
-					if (!isTerminalTaskStatus(task.status)) return;
+				let settled = false;
+				const finish = (status: TaskStatus) => {
+					if (settled) return;
+					settled = true;
 					unsub();
 					resolve({
 						taskId,
-						endReason: task.status as
+						endReason: status as
 							| "completed"
 							| "failed"
 							| "killed"
 							| "budget_exceeded",
 						durationMs: Date.now() - startedAt,
 					});
+				};
+				const unsub = deps.taskStore.onChange((task) => {
+					if (task.id !== taskId) return;
+					if (!isTerminalTaskStatus(task.status)) return;
+					finish(task.status);
 				});
+				// Now that we're listening, sample current state — if the task
+				// already raced past us into terminal before we subscribed,
+				// resolve from here.
+				const current = deps.taskStore.get(taskId);
+				if (isTerminalTaskStatus(current.status)) finish(current.status);
 			});
 		},
 		cancel(taskId: string) {
