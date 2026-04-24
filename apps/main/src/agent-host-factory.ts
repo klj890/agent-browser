@@ -19,7 +19,10 @@ import { fileURLToPath } from "node:url";
 import {
 	type BrowserToolsCtx,
 	createBrowserToolsSkills,
+	createTabsSkills,
 	type Skill,
+	type TabController,
+	type TabInfo,
 } from "@agent-browser/browser-tools";
 import type { AdminPolicy } from "./admin-policy.js";
 import {
@@ -91,19 +94,60 @@ export async function createAgentHostForTab(
 	const { tabManager, policy, streamFn } = deps;
 	const { tabId, persona } = opts;
 
-	const cdp = tabManager.getTabCdp(tabId);
-	const registry = tabManager.getTabRegistry(tabId);
-	if (!cdp || !registry) {
+	// Smoke-check: the starting tab must have CDP wired. Subsequent tabs
+	// (opened via tabs_open) allocate lazily on first tool use.
+	if (!tabManager.getTabCdp(tabId) || !tabManager.getTabRegistry(tabId)) {
 		throw new Error(`tab '${tabId}' has no CDP/registry (not yet loaded?)`);
 	}
-	const tabSummary = tabManager.list().find((t) => t.id === tabId);
+
+	// The Agent's "logical active tab" — decoupled from the user's foreground
+	// tab so the Agent can background-research in a tab it opened without
+	// disrupting the user. Multi-tab tools (tabs_switch) mutate this ref.
+	const activeAgentTab = { id: tabId };
+	const findSummary = (id: string) =>
+		tabManager.list().find((t) => t.id === id);
+	// Build a ctx whose cdp/registry/pageUrl/pageTitle resolve *per call* to
+	// whichever tab the Agent currently has focused. Using getters keeps the
+	// five original tools' execute() bodies unchanged.
 	const ctx: BrowserToolsCtx = {
-		cdp,
-		registry,
-		pageUrl: tabSummary?.url,
-		pageTitle: tabSummary?.title,
+		get cdp() {
+			const c = tabManager.getTabCdp(activeAgentTab.id);
+			if (!c) {
+				throw new Error(
+					`agent active tab '${activeAgentTab.id}' has no CDP (tab closed?)`,
+				);
+			}
+			return c;
+		},
+		get registry() {
+			const r = tabManager.getTabRegistry(activeAgentTab.id);
+			if (!r) {
+				throw new Error(
+					`agent active tab '${activeAgentTab.id}' has no registry (tab closed?)`,
+				);
+			}
+			return r;
+		},
+		get pageUrl() {
+			return findSummary(activeAgentTab.id)?.url;
+		},
+		get pageTitle() {
+			return findSummary(activeAgentTab.id)?.title;
+		},
 	};
-	const allSkills = createBrowserToolsSkills(ctx);
+	const navigationPolicy = {
+		allowedUrlSchemes: policy.allowedUrlSchemes,
+		allowedDomains: policy.allowedDomains,
+		blockedDomains: policy.blockedDomains,
+	};
+	const tabController = createTabControllerForAgent(tabManager, activeAgentTab);
+	const allSkills = [
+		...createBrowserToolsSkills(ctx),
+		...createTabsSkills({
+			controller: tabController,
+			policy: navigationPolicy,
+		}),
+	];
 	const skills = filterSkills(allSkills, policy, persona);
 
 	const systemPrompt = await renderTemplate(
@@ -262,6 +306,73 @@ function hashArgs(args: unknown): string {
 	} catch {
 		return "0";
 	}
+}
+
+/**
+ * Build a TabController bound to a mutable "agent active tab" ref. The
+ * controller enforces the P2-18 policy constraints (Agent can only close
+ * tabs it opened; switching does not steal user foreground) before handing
+ * off to TabManager.
+ */
+function createTabControllerForAgent(
+	tabManager: TabManager,
+	activeAgentTab: { id: string },
+): TabController {
+	const toInfo = (
+		t: ReturnType<TabManager["list"]>[number],
+		agentActiveId: string,
+	): TabInfo => ({
+		id: t.id,
+		url: t.url,
+		title: t.title,
+		openedByAgent: t.openedByAgent,
+		agentActive: t.id === agentActiveId,
+	});
+	return {
+		list() {
+			const activeId = activeAgentTab.id;
+			return tabManager.list().map((t) => toInfo(t, activeId));
+		},
+		open(url) {
+			// url has already passed policy in the skill layer; TabManager will
+			// flag openedByAgent so tabs_close can recognise ownership.
+			return tabManager.create(url, {
+				openedByAgent: true,
+				background: true,
+			});
+		},
+		close(id) {
+			tabManager.close(id);
+		},
+		canClose(id) {
+			const tab = tabManager.list().find((t) => t.id === id);
+			return tab?.openedByAgent === true;
+		},
+		exists(id) {
+			return tabManager.list().some((t) => t.id === id);
+		},
+		setAgentActive(id) {
+			if (!tabManager.list().some((t) => t.id === id)) return;
+			activeAgentTab.id = id;
+		},
+		getAgentActiveId() {
+			return activeAgentTab.id;
+		},
+		waitLoad(id, timeoutMs) {
+			return new Promise((resolve) => {
+				const start = Date.now();
+				const poll = () => {
+					const tab = tabManager.list().find((t) => t.id === id);
+					if (!tab) return resolve("timeout");
+					if (tab.state === "idle") return resolve("idle");
+					if (tab.state === "crashed") return resolve("crashed");
+					if (Date.now() - start >= timeoutMs) return resolve("timeout");
+					setTimeout(poll, 100);
+				};
+				poll();
+			});
+		},
+	};
 }
 
 function filterSkills(
