@@ -19,6 +19,13 @@ import { CdpAdapter } from "./cdp-adapter.js";
 
 export type TabState = "loading" | "idle" | "suspended" | "crashed";
 
+/**
+ * Lifecycle events emitted through `addTabEventListener`. The coarse
+ * `state-changed` is enough for waitLoad — it re-reads TabSummary.state
+ * after wakeup — and spares us coupling on the exact TabState enum.
+ */
+export type TabLifecycleEvent = "state-changed" | "removed";
+
 export interface TabSummary {
 	id: string;
 	url: string;
@@ -178,6 +185,15 @@ export class TabManager {
 	private activeTabId?: string;
 	private readonly closedStack: ClosedTabRecord[] = [];
 	private destroyed = false;
+	/**
+	 * Per-tab subscribers invoked on lifecycle transitions (state change /
+	 * removal). Used by Agent waitLoad to escape polling — wake up the moment
+	 * the tab reaches `idle`/`crashed`, not 100ms later.
+	 */
+	private readonly tabEventListeners = new Map<
+		string,
+		Set<(event: TabLifecycleEvent) => void>
+	>();
 
 	constructor(deps: TabManagerDeps) {
 		this.window = deps.window;
@@ -288,6 +304,10 @@ export class TabManager {
 			// webContents may already be gone; ignore
 		}
 		this.tabs.delete(id);
+		// Notify subscribers *after* the tab is gone from the map so that a
+		// listener calling getSummary(id) on wakeup correctly sees undefined.
+		this.emitTabEvent(id, "removed");
+		this.tabEventListeners.delete(id);
 
 		// Incognito cleanup: if this was the last tab for its partition, ask host
 		// to clear the Electron session so cookies/localStorage don't linger.
@@ -340,6 +360,45 @@ export class TabManager {
 	getSummary(id: string): TabSummary | undefined {
 		const t = this.tabs.get(id);
 		return t ? this.toSummary(t) : undefined;
+	}
+
+	/**
+	 * Subscribe to a tab's lifecycle events. Returns an unsubscribe fn.
+	 * The callback fires on state transitions (loading→idle, render-gone→
+	 * crashed) and on removal. Unknown tab id registers the listener
+	 * against that id anyway — if the tab is later created with that id
+	 * it'll still receive events (Agent flow: open → subscribe is atomic
+	 * inside waitLoad so this edge doesn't actually occur in production).
+	 */
+	addTabEventListener(
+		id: string,
+		cb: (event: TabLifecycleEvent) => void,
+	): () => void {
+		let set = this.tabEventListeners.get(id);
+		if (!set) {
+			set = new Set();
+			this.tabEventListeners.set(id, set);
+		}
+		set.add(cb);
+		return () => {
+			const s = this.tabEventListeners.get(id);
+			if (!s) return;
+			s.delete(cb);
+			if (s.size === 0) this.tabEventListeners.delete(id);
+		};
+	}
+
+	private emitTabEvent(id: string, event: TabLifecycleEvent): void {
+		const set = this.tabEventListeners.get(id);
+		if (!set) return;
+		// Snapshot to avoid concurrent mutation if a listener unsubscribes itself.
+		for (const cb of Array.from(set)) {
+			try {
+				cb(event);
+			} catch (err) {
+				console.warn("[tab-manager] tab event listener threw:", err);
+			}
+		}
 	}
 
 	private toSummary(t: Tab): TabSummary {
@@ -491,6 +550,7 @@ export class TabManager {
 			} catch {
 				/* ignore */
 			}
+			this.emitTabEvent(tab.id, "state-changed");
 		});
 		// Clear ref registry whenever the page lifetime turns over. We listen for
 		// both Electron's did-navigate AND the CDP-equivalent page-frame-navigated
@@ -528,6 +588,7 @@ export class TabManager {
 		});
 		wc.on("render-process-gone", () => {
 			tab.state = "crashed";
+			this.emitTabEvent(tab.id, "state-changed");
 		});
 	}
 

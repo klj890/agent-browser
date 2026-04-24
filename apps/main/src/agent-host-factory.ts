@@ -366,13 +366,14 @@ export function createTabControllerForAgent(
 		},
 		waitLoad(id, timeoutMs, signal) {
 			return new Promise((resolve) => {
-				const start = Date.now();
-				let handle: ReturnType<typeof setTimeout> | undefined;
+				let unsub: (() => void) | undefined;
+				let timer: ReturnType<typeof setTimeout> | undefined;
 				let settled = false;
 				const settle = (r: Parameters<typeof resolve>[0]) => {
 					if (settled) return;
 					settled = true;
-					if (handle) clearTimeout(handle);
+					if (timer) clearTimeout(timer);
+					unsub?.();
 					signal?.removeEventListener("abort", onAbort);
 					resolve(r);
 				};
@@ -381,19 +382,23 @@ export function createTabControllerForAgent(
 					if (signal.aborted) return settle("aborted");
 					signal.addEventListener("abort", onAbort, { once: true });
 				}
-				const poll = () => {
-					if (settled) return;
+				// Terminal-state check: if already idle/crashed/missing, don't
+				// even bother subscribing.
+				const probe = () => {
 					const tab = tabManager.getSummary(id);
-					// Tab vanished mid-poll (closed by user / crashed-and-cleaned):
-					// surface a distinct "not_found" so the Agent can decide
-					// whether to retry or give up, rather than conflate with timeout.
 					if (!tab) return settle("not_found");
 					if (tab.state === "idle") return settle("idle");
 					if (tab.state === "crashed") return settle("crashed");
-					if (Date.now() - start >= timeoutMs) return settle("timeout");
-					handle = setTimeout(poll, 100);
 				};
-				poll();
+				probe();
+				if (settled) return;
+				// Event-driven: wake up the moment state flips (did-finish-load /
+				// render-process-gone) or the tab is removed. No 100ms polling.
+				unsub = tabManager.addTabEventListener(id, (event) => {
+					if (event === "removed") return settle("not_found");
+					probe();
+				});
+				timer = setTimeout(() => settle("timeout"), timeoutMs);
 			});
 		},
 	};
