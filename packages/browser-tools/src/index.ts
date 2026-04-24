@@ -26,6 +26,21 @@ export type {
 export { ActInput, act, flagHighRisk } from "./act.js";
 export { wrapUntrusted } from "./content-boundary.js";
 export type {
+	FsDriver,
+	FsLsEntry,
+	FsLsResult,
+	FsReadResult,
+	FsReason,
+	FsSandbox,
+	FsWriteResult,
+} from "./fs.js";
+export {
+	createFsSkills,
+	FsLsInput,
+	FsReadInput,
+	FsWriteInput,
+} from "./fs.js";
+export type {
 	GotoCdp,
 	GotoCtx,
 	GotoReason,

@@ -14,12 +14,22 @@
  * The factory is deliberately small — it's a dep-assembly function, not a
  * business logic home. Tests unit-test each collaborator separately.
  */
+import {
+	mkdir,
+	readdir,
+	readFile,
+	realpath,
+	stat,
+	writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	type BrowserToolsCtx,
 	createBrowserToolsSkills,
+	createFsSkills,
 	createTabsSkills,
+	type FsDriver,
 	type Skill,
 	type TabController,
 	type TabInfo,
@@ -158,12 +168,23 @@ export async function createAgentHostForTab(
 	};
 	const tabController = createTabControllerForAgent(tabManager, activeAgentTab);
 	const externalSkills = deps.externalMcp?.skills() ?? [];
+	// Filesystem skills (P2 §2.7). Always built so the LLM sees they exist
+	// even when `fsSandboxDirs` is empty — callers get a clean
+	// `not_in_sandbox` rejection rather than "tool not found", which is
+	// easier for the LLM to recover from (it can ask the user to grant
+	// a folder).
+	const fsSkills = createFsSkills({
+		allowedDirs: policy.fsSandboxDirs.map((d) => path.resolve(d)),
+		driver: nodeFsDriver,
+		resolve: (p) => path.resolve(p),
+	});
 	const allSkills = [
 		...createBrowserToolsSkills(ctx),
 		...createTabsSkills({
 			controller: tabController,
 			policy: navigationPolicy,
 		}),
+		...fsSkills,
 		// External MCP tools go LAST so an externally-configured tool
 		// can never shadow a built-in by sharing its name — filterSkills
 		// later keeps only names in policy.allowedTools anyway.
@@ -443,6 +464,37 @@ export function createTabControllerForAgent(
  * in AdminPolicy.allowedTools. The separator is `__`; first-party tools
  * that need an underscore use a single one (e.g. `tabs_open`).
  */
+/**
+ * Node-backed FsDriver used in production. Wraps the node:fs/promises
+ * subset the skill layer calls — small enough that we don't need a
+ * separate driver module.
+ */
+const nodeFsDriver: FsDriver = {
+	async readFile(p) {
+		return readFile(p);
+	},
+	async writeFile(p, data) {
+		await writeFile(p, data);
+	},
+	async readdir(p) {
+		return readdir(p);
+	},
+	async stat(p) {
+		const s = await stat(p);
+		return {
+			isFile: s.isFile(),
+			isDirectory: s.isDirectory(),
+			size: s.size,
+		};
+	},
+	async mkdir(p, opts) {
+		await mkdir(p, opts);
+	},
+	async realpath(p) {
+		return realpath(p);
+	},
+};
+
 export function isExternalMcpSkillName(name: string): boolean {
 	return name.includes("__");
 }

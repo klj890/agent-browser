@@ -56,20 +56,25 @@ export type UrlScheme = z.infer<typeof UrlScheme>;
 export const AdminPolicySchema = z.object({
 	version: z.literal(1),
 	autonomy: AutonomyLevel.default("confirm-each"),
-	allowedTools: z
-		.array(z.string())
-		.default([
-			"snapshot",
-			"read",
-			"goto",
-			"act",
-			"screenshot",
-			"tabs_list",
-			"tabs_open",
-			"tabs_close",
-			"tabs_switch",
-			"tabs_wait_load",
-		]),
+	allowedTools: z.array(z.string()).default([
+		"snapshot",
+		"read",
+		"goto",
+		"act",
+		"screenshot",
+		"tabs_list",
+		"tabs_open",
+		"tabs_close",
+		"tabs_switch",
+		"tabs_wait_load",
+		// fs_* are always in the allowed list, but the actual sandbox is
+		// gated by AdminPolicy.fsSandboxDirs (empty = no access). Leaving
+		// them out would mean the Agent can't even *see* the tools when
+		// admin flips fsSandboxDirs on without touching allowedTools.
+		"fs_read",
+		"fs_write",
+		"fs_ls",
+	]),
 	allowedDomains: z.array(z.string()).default([]),
 	allowedUrlSchemes: z.array(UrlScheme).default(["http", "https"]),
 	blockedDomains: z.array(z.string()).default([]),
@@ -88,6 +93,18 @@ export const AdminPolicySchema = z.object({
 	 *    `slack` reach the Agent.
 	 */
 	allowedExternalMcpPrefixes: z.array(z.string()).optional(),
+	/**
+	 * Filesystem sandbox — absolute directory paths the Agent may read/
+	 * write via `fs_*` tools (P2 §2.7, BrowserOS "Cowork"). Empty default
+	 * means the filesystem tools are effectively disabled: the Agent can
+	 * see they exist but every call returns `not_in_sandbox`. Admins opt
+	 * in by listing allowed roots (e.g. `~/Documents/agent-work`).
+	 *
+	 * The Agent can never escape these roots even via `..` or a symlink
+	 * pointing outside — the fs skill layer calls `realpath` and checks
+	 * the prefix before any fs operation.
+	 */
+	fsSandboxDirs: z.array(z.string()).default([]),
 	forceConfirmActions: z
 		.array(HighRiskAction)
 		.default([
