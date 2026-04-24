@@ -73,6 +73,21 @@ export const AdminPolicySchema = z.object({
 	allowedDomains: z.array(z.string()).default([]),
 	allowedUrlSchemes: z.array(UrlScheme).default(["http", "https"]),
 	blockedDomains: z.array(z.string()).default([]),
+	/**
+	 * External MCP prefix allowlist (P2 §2.6). External tools are named
+	 * `<prefix>__<remote-name>` — `allowedTools` cannot enumerate them
+	 * because the admin doesn't know them at policy-write time. This
+	 * field lets the admin constrain *which* external servers may feed
+	 * tools to the Agent without needing per-tool rules.
+	 *
+	 *  - `undefined` (default): every configured external server is
+	 *    allowed (backwards-compat; matches "admin hasn't opted in to
+	 *    per-source gating yet").
+	 *  - `[]`: block every external tool.
+	 *  - `["gh", "slack"]`: only tools from servers with prefix `gh` or
+	 *    `slack` reach the Agent.
+	 */
+	allowedExternalMcpPrefixes: z.array(z.string()).optional(),
 	forceConfirmActions: z
 		.array(HighRiskAction)
 		.default([

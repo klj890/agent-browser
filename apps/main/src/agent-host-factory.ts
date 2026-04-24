@@ -36,6 +36,7 @@ import type { AuditLog } from "./audit-log.js";
 import type { AuthVault } from "./auth-vault.js";
 import type { ConfirmationHandler } from "./confirmation.js";
 import { createDefaultStreamFn } from "./llm/factory.js";
+import type { McpExternalManager } from "./mcp-external-manager.js";
 import type { Persona, PersonaManager } from "./persona-manager.js";
 import { renderTemplate } from "./prompts/render.js";
 import {
@@ -79,6 +80,12 @@ export interface FactoryDeps {
 	 * (e.g. in unit tests that care only about tool wiring).
 	 */
 	soul?: SoulProvider;
+	/**
+	 * Optional P2 §2.6 integration: external MCP servers whose tools get
+	 * merged into the Agent skill set (gmail / slack / github adapters).
+	 * Undefined → Agent runs with only our own browser-tools.
+	 */
+	externalMcp?: McpExternalManager;
 }
 
 export interface CreateAgentHostOpts {
@@ -150,12 +157,17 @@ export async function createAgentHostForTab(
 		blockedDomains: policy.blockedDomains,
 	};
 	const tabController = createTabControllerForAgent(tabManager, activeAgentTab);
+	const externalSkills = deps.externalMcp?.skills() ?? [];
 	const allSkills = [
 		...createBrowserToolsSkills(ctx),
 		...createTabsSkills({
 			controller: tabController,
 			policy: navigationPolicy,
 		}),
+		// External MCP tools go LAST so an externally-configured tool
+		// can never shadow a built-in by sharing its name — filterSkills
+		// later keeps only names in policy.allowedTools anyway.
+		...externalSkills,
 	];
 	const skills = filterSkills(allSkills, policy, persona);
 
@@ -425,6 +437,25 @@ export function createTabControllerForAgent(
 	};
 }
 
+/**
+ * Tool names of the form `<prefix>__<remote>` are externally-defined
+ * (P2 §2.6 MCP client) — configured out-of-band by the user, not enumerable
+ * in AdminPolicy.allowedTools. The separator is `__`; first-party tools
+ * that need an underscore use a single one (e.g. `tabs_open`).
+ */
+export function isExternalMcpSkillName(name: string): boolean {
+	return name.includes("__");
+}
+
+/**
+ * Extract the server-prefix portion of an external tool name. Returns
+ * undefined when the name isn't external. `gh__star_repo` → `"gh"`.
+ */
+export function externalMcpPrefixOf(name: string): string | undefined {
+	const i = name.indexOf("__");
+	return i > 0 ? name.slice(0, i) : undefined;
+}
+
 function filterSkills(
 	all: Skill[],
 	policy: AdminPolicy,
@@ -434,8 +465,24 @@ function filterSkills(
 	const personaAllowed = persona.frontmatter.allowedTools
 		? new Set(persona.frontmatter.allowedTools)
 		: null;
+	// External prefix allowlist: undefined = accept-all (opt-in), [] = block-all,
+	// ["gh", "slack"] = only those prefixes. See AdminPolicy doc.
+	const externalAllowed =
+		policy.allowedExternalMcpPrefixes != null
+			? new Set(policy.allowedExternalMcpPrefixes)
+			: null; // null sentinel → unrestricted
 	return all.filter((s) => {
-		if (!policyAllowed.has(s.name)) return false;
+		if (isExternalMcpSkillName(s.name)) {
+			// External tool: policy.allowedTools is bypassed (admin can't
+			// enumerate external tool names), but the prefix allowlist
+			// still applies when admin has opted in.
+			if (externalAllowed) {
+				const prefix = externalMcpPrefixOf(s.name);
+				if (prefix == null || !externalAllowed.has(prefix)) return false;
+			}
+		} else if (!policyAllowed.has(s.name)) {
+			return false;
+		}
 		if (personaAllowed && !personaAllowed.has(s.name)) return false;
 		return true;
 	});
