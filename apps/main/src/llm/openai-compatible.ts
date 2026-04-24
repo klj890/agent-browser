@@ -77,7 +77,7 @@ export class OpenAiCompatProvider implements LlmProvider {
 		this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
 		// Empty string normalises to undefined so the header-omit branch
 		// triggers for both `apiKey: ""` and `apiKey: undefined` callers.
-		this.apiKey = opts.apiKey ? opts.apiKey : undefined;
+		this.apiKey = opts.apiKey || undefined;
 		this.model = opts.model;
 		this.timeoutMs = opts.timeoutMs ?? 60_000;
 		this.fetchImpl = opts.fetchImpl ?? fetch;
