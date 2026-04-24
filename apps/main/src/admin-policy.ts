@@ -94,15 +94,22 @@ export const AdminPolicySchema = z.object({
 	 */
 	allowedExternalMcpPrefixes: z.array(z.string()).optional(),
 	/**
-	 * Filesystem sandbox — absolute directory paths the Agent may read/
-	 * write via `fs_*` tools (P2 §2.7, BrowserOS "Cowork"). Empty default
-	 * means the filesystem tools are effectively disabled: the Agent can
-	 * see they exist but every call returns `not_in_sandbox`. Admins opt
-	 * in by listing allowed roots (e.g. `~/Documents/agent-work`).
+	 * Filesystem sandbox — **absolute** directory paths the Agent may
+	 * read/write via `fs_*` tools (P2 §2.7, BrowserOS "Cowork"). Empty
+	 * default means the filesystem tools are effectively disabled: the
+	 * Agent can see they exist but every call returns `not_in_sandbox`.
+	 *
+	 * Values are passed through `path.resolve` verbatim, which does NOT
+	 * expand `~` to the user's home directory. Admins must spell out
+	 * the absolute path, e.g. `/Users/alice/Documents/agent-work` on
+	 * macOS or `C:\\Users\\Alice\\Documents\\agent-work` on Windows. A
+	 * future policy-loader helper may expand `~` client-side before
+	 * storing; the schema layer stays strict to avoid surprises.
 	 *
 	 * The Agent can never escape these roots even via `..` or a symlink
-	 * pointing outside — the fs skill layer calls `realpath` and checks
-	 * the prefix before any fs operation.
+	 * pointing outside — the fs skill layer walks up to the deepest
+	 * existing ancestor, realpaths it, and prefix-checks before any fs
+	 * operation.
 	 */
 	fsSandboxDirs: z.array(z.string()).default([]),
 	forceConfirmActions: z

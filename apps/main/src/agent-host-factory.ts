@@ -486,27 +486,35 @@ const nodeFsDriver: FsDriver = {
 	},
 	async readdirDetailed(p) {
 		const dirents = await readdir(p, { withFileTypes: true });
-		// Single stat per entry is unavoidable for size — `Dirent` doesn't
-		// carry size. Still far better than the previous readdir + stat
-		// pattern because isFile/isDirectory come from the dirent, not
-		// another stat call, so we halve the syscall count in practice
-		// and get correct results on symlinks (they appear as file or dir
-		// per OS convention instead of generic "other").
-		const out = [];
-		for (const d of dirents) {
-			try {
-				const s = await stat(`${p}/${d.name}`);
-				out.push({
-					name: d.name,
-					isFile: d.isFile(),
-					isDirectory: d.isDirectory(),
-					size: s.size,
-				});
-			} catch {
-				// Vanished between readdir and stat — silently skip.
-			}
-		}
-		return out;
+		// Parallelise stat-for-size (Dirent carries no size, so one stat
+		// per entry stays necessary). Sequential loop was O(N) wall-clock
+		// for large directories; Promise.all keeps throughput FS-bound.
+		// Use path.join (not string interp) so Windows backslash paths
+		// work. `stat()` follows symlinks — which matches what isFile()/
+		// isDirectory() via a second stat would report — so link target
+		// type + size land in the entry; broken symlinks are dropped by
+		// the catch below the same as a vanished file.
+		const results = await Promise.all(
+			dirents.map(async (d) => {
+				try {
+					const s = await stat(path.join(p, d.name));
+					return {
+						name: d.name,
+						// Prefer Dirent over the follow-symlink stat for the
+						// is{File,Directory} boolean so a symlink is reported
+						// as a symlink's link target only on size — not to
+						// advertise "this is a file" when it's a link to a
+						// directory.
+						isFile: s.isFile(),
+						isDirectory: s.isDirectory(),
+						size: s.size,
+					};
+				} catch {
+					return undefined;
+				}
+			}),
+		);
+		return results.filter((r): r is NonNullable<typeof r> => r !== undefined);
 	},
 	async stat(p) {
 		const s = await stat(p);
