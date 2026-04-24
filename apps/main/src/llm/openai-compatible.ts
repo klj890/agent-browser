@@ -18,7 +18,13 @@ import type { LlmProvider, LlmRequest, LlmStreamChunk } from "./types.js";
 export interface OpenAiCompatOpts {
 	name: string;
 	baseUrl: string;
-	apiKey: string;
+	/**
+	 * Bearer token. Leave blank/undefined for local providers (Ollama,
+	 * LM Studio) that expect an unauthenticated request — we skip the
+	 * `Authorization` header entirely rather than sending `Bearer ` with
+	 * an empty value, which some OpenAI-compat servers reject with 401.
+	 */
+	apiKey?: string;
 	model: string;
 	timeoutMs?: number;
 	/**
@@ -60,7 +66,7 @@ interface OpenAiStreamChunk {
 export class OpenAiCompatProvider implements LlmProvider {
 	readonly name: string;
 	private readonly baseUrl: string;
-	private readonly apiKey: string;
+	private readonly apiKey: string | undefined;
 	private readonly model: string;
 	private readonly timeoutMs: number;
 	private readonly fetchImpl: typeof fetch;
@@ -69,7 +75,9 @@ export class OpenAiCompatProvider implements LlmProvider {
 	constructor(opts: OpenAiCompatOpts) {
 		this.name = opts.name;
 		this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
-		this.apiKey = opts.apiKey;
+		// Empty string normalises to undefined so the header-omit branch
+		// triggers for both `apiKey: ""` and `apiKey: undefined` callers.
+		this.apiKey = opts.apiKey ? opts.apiKey : undefined;
 		this.model = opts.model;
 		this.timeoutMs = opts.timeoutMs ?? 60_000;
 		this.fetchImpl = opts.fetchImpl ?? fetch;
@@ -108,14 +116,20 @@ export class OpenAiCompatProvider implements LlmProvider {
 
 		let res: Response;
 		try {
+			// Omit `Authorization` entirely when no apiKey is configured —
+			// local servers (Ollama / LM Studio) return 401 on `Bearer `
+			// with an empty value rather than treating it as anonymous.
+			const requestHeaders: Record<string, string> = {
+				"Content-Type": "application/json",
+				Accept: "text/event-stream",
+				...this.headers,
+			};
+			if (this.apiKey) {
+				requestHeaders.Authorization = `Bearer ${this.apiKey}`;
+			}
 			res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
 				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${this.apiKey}`,
-					Accept: "text/event-stream",
-					...this.headers,
-				},
+				headers: requestHeaders,
 				body: JSON.stringify(body),
 				signal: mergedSignal,
 			});
