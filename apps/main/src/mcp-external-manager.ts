@@ -177,6 +177,11 @@ export class McpExternalManager {
 				ms,
 			);
 		});
+		// Attach a no-op catch to the inner promise so a late rejection —
+		// after timeoutP has already won the race — doesn't surface as an
+		// `unhandledRejection` in the event loop. The swallowed result is
+		// irrelevant; the caller has already received the timeout error.
+		p.catch(() => {});
 		// `finally` clears the timer whether `p` won or threw — otherwise the
 		// handle would keep the event loop alive past the winner's settlement.
 		return Promise.race([p, timeoutP]).finally(() => {
@@ -245,6 +250,21 @@ function embedSchemaInDescription(base: string, schema: unknown): string {
 	return `${base}\n\nArguments schema (summary — full JSON omitted, >${SCHEMA_MAX_CHARS} chars):\n${summary}`;
 }
 
+/**
+ * Normalise a JSON Schema `type` value to a printable string. Per the
+ * spec `type` can be a single string or an array of strings (union
+ * types, e.g. `["string", "null"]` for nullable fields). Returning
+ * "unknown" for arrays hides a valid and common pattern.
+ */
+function formatSchemaType(t: unknown): string {
+	if (typeof t === "string") return t;
+	if (Array.isArray(t)) {
+		const parts = t.filter((x): x is string => typeof x === "string");
+		if (parts.length > 0) return parts.join(" | ");
+	}
+	return "unknown";
+}
+
 function summariseSchema(schema: unknown): string {
 	if (!schema || typeof schema !== "object") return "<opaque>";
 	const s = schema as {
@@ -253,15 +273,15 @@ function summariseSchema(schema: unknown): string {
 		required?: unknown;
 	};
 	const lines: string[] = [];
-	if (typeof s.type === "string") lines.push(`type: ${s.type}`);
+	const topType = formatSchemaType(s.type);
+	if (topType !== "unknown") lines.push(`type: ${topType}`);
 	if (s.properties && typeof s.properties === "object") {
 		const required = Array.isArray(s.required)
 			? new Set(s.required.map(String))
 			: new Set<string>();
 		lines.push("properties:");
 		for (const [key, val] of Object.entries(s.properties)) {
-			const typeStr =
-				val && typeof val.type === "string" ? val.type : "unknown";
+			const typeStr = formatSchemaType(val?.type);
 			const req = required.has(key) ? " (required)" : "";
 			lines.push(`  - ${key}: ${typeStr}${req}`);
 		}

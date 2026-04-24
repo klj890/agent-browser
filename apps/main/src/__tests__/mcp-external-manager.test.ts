@@ -213,6 +213,53 @@ describe("McpExternalManager", () => {
 		}
 	});
 
+	it("summariseSchema handles JSON Schema type arrays like ['string','null']", async () => {
+		const bigProps: Record<string, { type: unknown; description?: string }> =
+			{};
+		// Properties use array type (nullable). Fill enough to trigger oversize → summary.
+		for (let i = 0; i < 200; i++) {
+			bigProps[`nullable_${i}`] = {
+				type: ["string", "null"],
+				description: "x".repeat(40),
+			};
+		}
+		const nullableSchema = {
+			type: "object",
+			properties: bigProps,
+			required: ["nullable_0"],
+		};
+		const client = {
+			id: "n",
+			prefix: () => "n",
+			isConnected: () => true,
+			listTools: (): McpRemoteTool[] => [
+				{
+					name: "n__do",
+					remoteName: "do",
+					description: "Do thing",
+					inputSchema: nullableSchema,
+				},
+			],
+			connect: async () => {},
+			callTool: async (): Promise<McpCallResult> => ({
+				content: [],
+				isError: false,
+			}),
+			disconnect: async () => {},
+		};
+		const mgr = new McpExternalManager({
+			servers: [spec("n")],
+			clientFactory: (() =>
+				client as unknown as import("../mcp-external-client.js").McpExternalClient) as unknown as ConstructorParameters<
+				typeof McpExternalManager
+			>[0]["clientFactory"],
+		});
+		await mgr.start();
+		const desc = mgr.skills()[0]?.description ?? "";
+		expect(desc).toContain("summary");
+		expect(desc).toContain("nullable_0: string | null (required)");
+	});
+
 	it("oversize JSON Schema → description falls back to valid summary (not truncated JSON)", async () => {
 		// Build a schema whose JSON exceeds 1KB so the truncate branch fires.
 		const bigProps: Record<string, { type: string; description: string }> = {};
