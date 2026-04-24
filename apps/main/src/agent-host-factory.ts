@@ -173,9 +173,6 @@ export async function createAgentHostForTab(
 		? [...skills, createReadResultSkill(deps.toolResultStorage) as Skill]
 		: skills;
 
-	const tabUrl =
-		tabManager.list().find((t) => t.id === tabId)?.url ?? "about:blank";
-
 	const preToolHooks: Array<HookMap["pre-tool-call"]> = [];
 	if (deps.confirmation) {
 		preToolHooks.push(
@@ -194,8 +191,11 @@ export async function createAgentHostForTab(
 
 	let currentTaskIdRef: string | undefined;
 	const currentTaskId = () => currentTaskIdRef ?? "unknown";
-	let currentTabUrlRef = tabUrl;
-	const currentTabUrl = () => currentTabUrlRef;
+	// Resolve the URL of the Agent's *current* logical tab at call time, so
+	// confirmation prompts correctly attribute the origin after tabs_switch
+	// or in-tab navigation. Static capture would freeze it at construction.
+	const currentTabUrl = () =>
+		findSummary(activeAgentTab.id)?.url ?? "about:blank";
 
 	const preLlmHooks: Array<HookMap["pre-llm-call"]> = [];
 	const postLlmHooks: Array<HookMap["post-llm-call"]> = [];
@@ -257,12 +257,6 @@ export async function createAgentHostForTab(
 		vault: deps.vault,
 	});
 
-	// Track tab url so confirmation hook can report the current origin.
-	const refreshUrl = () => {
-		currentTabUrlRef =
-			tabManager.list().find((t) => t.id === tabId)?.url ?? currentTabUrlRef;
-	};
-	refreshUrl();
 	return host;
 }
 
