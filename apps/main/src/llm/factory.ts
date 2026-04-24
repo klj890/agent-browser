@@ -113,8 +113,11 @@ export function buildProviderChain(
 	// base URL env var (they run the daemon themselves). No API key is sent;
 	// OpenAiCompatProvider omits the Authorization header when apiKey is
 	// blank so local daemons don't 401 on `Bearer `.
-	const lmStudioUrl = env.LMSTUDIO_BASE_URL;
-	const lmStudioModel = env.LMSTUDIO_MODEL;
+	// All env reads .trim() so a trailing newline from a sloppy `.env`
+	// copy-paste doesn't ship whitespace into URLs/model names (same
+	// motivation as the apiKey trim in OpenAiCompatProvider).
+	const lmStudioUrl = env.LMSTUDIO_BASE_URL?.trim();
+	const lmStudioModel = env.LMSTUDIO_MODEL?.trim();
 	if (lmStudioUrl && lmStudioModel) {
 		// LM Studio requires the user to pick a loaded model name — there's
 		// no sensible default, so we only enable this provider when both
@@ -129,15 +132,16 @@ export function buildProviderChain(
 		);
 	}
 
-	const ollamaUrl = env.OLLAMA_BASE_URL;
+	const ollamaUrl = env.OLLAMA_BASE_URL?.trim();
 	if (ollamaUrl) {
 		providers.push(
 			new OpenAiCompatProvider({
 				name: "ollama",
 				baseUrl: ollamaUrl,
-				// `||` (not `??`) so that `OLLAMA_MODEL=""` falls back too —
-				// empty env vars shouldn't reach the provider as a model name.
-				model: env.OLLAMA_MODEL || "llama3.1",
+				// `||` (not `??`) so that `OLLAMA_MODEL=""` or whitespace-only
+				// falls back too — empty env vars shouldn't reach the
+				// provider as a model name.
+				model: env.OLLAMA_MODEL?.trim() || "llama3.1",
 				fetchImpl,
 			}),
 		);
