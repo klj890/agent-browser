@@ -40,6 +40,17 @@ export interface Routine {
 	enabled: boolean;
 }
 
+export type RoutineRunStatus = "ok" | "error" | "stale_timeout" | "aborted";
+
+export interface RoutineRun {
+	startedAt: number;
+	finishedAt: number;
+	durationMs: number;
+	status: RoutineRunStatus;
+	error?: string;
+	taskId?: string;
+}
+
 export interface RoutineStatus {
 	name: string;
 	description?: string;
@@ -48,15 +59,42 @@ export interface RoutineStatus {
 	prompt: string;
 	enabled: boolean;
 	lastRunAt?: number;
-	lastRunStatus?: "ok" | "error";
+	lastRunStatus?: RoutineRunStatus;
 	lastRunError?: string;
 	nextRunAt?: number; // best-effort; node-cron doesn't expose precise next-fire so left undefined
 	scheduled: boolean;
+	/** Count of entries retained in run history (capped by RUN_HISTORY_LIMIT). */
+	runCount?: number;
 }
 
 export interface RoutineOrchestrator {
 	startTask(prompt: string, target: (chunk: unknown) => void): Promise<string>;
+	/**
+	 * Optional: execute prompt and resolve only when the underlying task
+	 * reaches a terminal state. Implementations should honour the AbortSignal
+	 * to kill in-flight work on stale timeout. `scheduledTask` lets the
+	 * orchestrator apply a restricted tool set — scheduled routines should
+	 * not, for example, upload files or drive cross-origin navigation
+	 * without an explicit user in the loop.
+	 *
+	 * Routines engine prefers this when present and falls back to
+	 * `startTask` (fire-and-forget) otherwise. Falling back means the engine
+	 * can only record "started" not "finished" — the run history entry's
+	 * `status` will always be `ok` in that mode.
+	 */
+	runToCompletion?(
+		prompt: string,
+		opts?: { signal?: AbortSignal; scheduledTask?: boolean },
+	): Promise<{
+		taskId: string;
+		endReason: "completed" | "failed" | "killed" | "budget_exceeded";
+		durationMs: number;
+		error?: string;
+	}>;
 }
+
+const RUN_HISTORY_LIMIT = 15;
+const DEFAULT_EXECUTION_TIMEOUT_MS = 10 * 60 * 1000; // 10 min — matches BrowserOS
 
 interface ParseError {
 	file: string;
@@ -181,12 +219,21 @@ export interface RoutinesEngineOptions {
 		schedule: (expr: string, fn: () => void | Promise<void>) => ScheduledTask;
 		validate: (expr: string) => boolean;
 	};
+	/**
+	 * Kill a running routine if it exceeds this duration; its run record is
+	 * marked `stale_timeout`. Default 10 minutes; matches BrowserOS so a
+	 * runaway Agent can't occupy resources for hours.
+	 */
+	executionTimeoutMs?: number;
+	/** Injected clock — lets tests pin `startedAt` / `durationMs`. */
+	now?: () => number;
 }
 
 interface Entry {
 	routine: Routine;
 	status: RoutineStatus;
 	task?: ScheduledTask;
+	runs: RoutineRun[];
 }
 
 export class RoutinesEngine {
@@ -200,6 +247,8 @@ export class RoutinesEngine {
 		schedule: (e: string, f: () => void | Promise<void>) => ScheduledTask;
 		validate: (e: string) => boolean;
 	};
+	private readonly executionTimeoutMs: number;
+	private readonly now: () => number;
 	private entries: Map<string, Entry> = new Map();
 	private parseErrors: ParseError[] = [];
 	private running = false;
@@ -219,6 +268,9 @@ export class RoutinesEngine {
 			},
 			validate: (e) => cron.validate(e),
 		};
+		this.executionTimeoutMs =
+			opts.executionTimeoutMs ?? DEFAULT_EXECUTION_TIMEOUT_MS;
+		this.now = opts.now ?? Date.now;
 	}
 
 	/** Scan directory, parse yaml files, rebuild entry map. Does not start cron. */
@@ -253,6 +305,9 @@ export class RoutinesEngine {
 					this.parseErrors.push({ file, error: "duplicate name" });
 					continue;
 				}
+				// Preserve in-memory run history across reload so UI state
+				// doesn't reset when the user edits a YAML file on disk.
+				const prior = this.entries.get(r.name);
 				fresh.set(r.name, {
 					routine: r,
 					status: {
@@ -263,7 +318,12 @@ export class RoutinesEngine {
 						prompt: r.prompt,
 						enabled: r.enabled,
 						scheduled: false,
+						lastRunAt: prior?.status.lastRunAt,
+						lastRunStatus: prior?.status.lastRunStatus,
+						lastRunError: prior?.status.lastRunError,
+						runCount: prior?.runs.length ?? 0,
 					},
+					runs: prior?.runs ?? [],
 				});
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
@@ -326,17 +386,99 @@ export class RoutinesEngine {
 		const discard = (_chunk: unknown) => {
 			/* headless — renderer has no subscription */
 		};
+		const startedAt = this.now();
+		const run: RoutineRun = {
+			startedAt,
+			finishedAt: startedAt,
+			durationMs: 0,
+			status: "ok",
+		};
+		const record = (patch: Partial<RoutineRun>): void => {
+			Object.assign(run, patch);
+			run.finishedAt = this.now();
+			run.durationMs = run.finishedAt - startedAt;
+			entry.status.lastRunAt = run.finishedAt;
+			entry.status.lastRunStatus = run.status;
+			entry.status.lastRunError = run.error;
+			// Push + cap. We append then shift rather than unshift so the
+			// array stays in chronological order (oldest → newest) and the
+			// UI can reverse for display. Cap constant intentionally small
+			// since history lives in memory only.
+			entry.runs.push(run);
+			if (entry.runs.length > RUN_HISTORY_LIMIT) {
+				entry.runs.splice(0, entry.runs.length - RUN_HISTORY_LIMIT);
+			}
+			entry.status.runCount = entry.runs.length;
+		};
+
+		const runner = this.orchestrator.runToCompletion;
+		if (!runner) {
+			// Legacy fire-and-forget path: the engine only knows the task
+			// started, not whether it finished. Record 'ok' optimistically;
+			// timeout/abort detection is impossible without runToCompletion.
+			try {
+				const taskId = await this.orchestrator.startTask(
+					entry.routine.prompt,
+					discard,
+				);
+				record({ status: "ok", taskId });
+			} catch (err) {
+				record({
+					status: "error",
+					error: err instanceof Error ? err.message : String(err),
+				});
+				throw err;
+			}
+			return;
+		}
+
+		const ac = new AbortController();
+		const timer = setTimeout(() => ac.abort(), this.executionTimeoutMs);
+		let timedOut = false;
+		ac.signal.addEventListener(
+			"abort",
+			() => {
+				timedOut = true;
+			},
+			{ once: true },
+		);
 		try {
-			await this.orchestrator.startTask(entry.routine.prompt, discard);
-			entry.status.lastRunAt = Date.now();
-			entry.status.lastRunStatus = "ok";
-			entry.status.lastRunError = undefined;
+			const res = await runner.call(this.orchestrator, entry.routine.prompt, {
+				signal: ac.signal,
+				scheduledTask: true,
+			});
+			if (res.endReason === "completed") {
+				record({ status: "ok", taskId: res.taskId });
+			} else if (res.endReason === "killed" && timedOut) {
+				record({
+					status: "stale_timeout",
+					error: `exceeded ${this.executionTimeoutMs}ms`,
+					taskId: res.taskId,
+				});
+			} else if (res.endReason === "killed") {
+				record({ status: "aborted", taskId: res.taskId });
+			} else {
+				record({
+					status: "error",
+					error: res.error ?? res.endReason,
+					taskId: res.taskId,
+				});
+			}
 		} catch (err) {
-			entry.status.lastRunAt = Date.now();
-			entry.status.lastRunStatus = "error";
-			entry.status.lastRunError =
-				err instanceof Error ? err.message : String(err);
+			if (timedOut) {
+				record({
+					status: "stale_timeout",
+					error: `exceeded ${this.executionTimeoutMs}ms`,
+				});
+			} else {
+				record({
+					status: "error",
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
 			throw err;
+		} finally {
+			clearTimeout(timer);
 		}
 	}
 
@@ -348,12 +490,26 @@ export class RoutinesEngine {
 	}
 
 	list(): RoutineStatus[] {
-		return Array.from(this.entries.values()).map((e) => ({ ...e.status }));
+		return Array.from(this.entries.values()).map((e) => ({
+			...e.status,
+			runCount: e.runs.length,
+		}));
 	}
 
 	/** Return parse errors from the most recent load() — useful for UI hints. */
 	getParseErrors(): ParseError[] {
 		return [...this.parseErrors];
+	}
+
+	/** Recent runs for a routine, newest last. Returns `[]` for unknown name. */
+	getRuns(name: string, limit?: number): RoutineRun[] {
+		const entry = this.entries.get(name);
+		if (!entry) return [];
+		const out = entry.runs.slice();
+		if (limit != null && limit >= 0 && out.length > limit) {
+			return out.slice(out.length - limit);
+		}
+		return out;
 	}
 
 	/** Create a routine (writes `<name>.yaml`, reloads cron for it). */
@@ -377,7 +533,9 @@ export class RoutinesEngine {
 				prompt: routine.prompt,
 				enabled: routine.enabled,
 				scheduled: false,
+				runCount: 0,
 			},
+			runs: [],
 		};
 		this.entries.set(routine.name, entry);
 		if (this.running) this.scheduleEntry(entry);
@@ -417,6 +575,7 @@ export class RoutinesEngine {
 			lastRunAt: entry.status.lastRunAt,
 			lastRunStatus: entry.status.lastRunStatus,
 			lastRunError: entry.status.lastRunError,
+			runCount: entry.runs.length,
 		};
 		const file = path.join(this.dir, `${safeFilename(next.name)}.yaml`);
 		await writeFile(file, serializeRoutine(next), "utf8");

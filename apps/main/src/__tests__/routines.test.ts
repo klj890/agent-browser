@@ -370,3 +370,181 @@ describe("RoutinesEngine.create/update/delete/setEnabled", () => {
 		expect(engine.list()[0]?.enabled).toBe(false);
 	});
 });
+
+describe("RoutinesEngine — stale timeout + run history (P2 §2.5)", () => {
+	function makeCompletingOrch(opts: {
+		endReason?: "completed" | "failed" | "killed";
+		delayMs?: number;
+		throwErr?: string;
+	}) {
+		const calls: Array<{ prompt: string; scheduled?: boolean }> = [];
+		return {
+			calls,
+			async startTask(_prompt: string) {
+				return "legacy-id";
+			},
+			async runToCompletion(
+				prompt: string,
+				o?: { signal?: AbortSignal; scheduledTask?: boolean },
+			) {
+				calls.push({ prompt, scheduled: o?.scheduledTask });
+				if (opts.throwErr) throw new Error(opts.throwErr);
+				// Honour abort: return `killed` immediately
+				if (opts.delayMs && opts.delayMs > 0) {
+					await new Promise<void>((resolve) => {
+						const t = setTimeout(resolve, opts.delayMs);
+						o?.signal?.addEventListener(
+							"abort",
+							() => {
+								clearTimeout(t);
+								resolve();
+							},
+							{ once: true },
+						);
+					});
+					if (o?.signal?.aborted) {
+						return {
+							taskId: "t1",
+							endReason: "killed" as const,
+							durationMs: opts.delayMs,
+						};
+					}
+				}
+				return {
+					taskId: "t1",
+					endReason: opts.endReason ?? "completed",
+					durationMs: opts.delayMs ?? 0,
+				};
+			},
+		};
+	}
+
+	function seedRoutine(name = "r") {
+		writeFileSync(
+			path.join(tmp, `${name}.yaml`),
+			`name: "${name}"\nschedule: "* * * * *"\nprompt: do-something\nenabled: true\n`,
+		);
+	}
+
+	it("runToCompletion path records ok + scheduledTask flag on successful run", async () => {
+		seedRoutine();
+		const orch = makeCompletingOrch({ endReason: "completed" });
+		const engine = new RoutinesEngine({
+			dir: tmp,
+			orchestrator: orch,
+			cronImpl: makeCronImpl().impl,
+		});
+		await engine.load();
+		await engine.runNow("r");
+		expect(orch.calls[0]?.scheduled).toBe(true);
+		const runs = engine.getRuns("r");
+		expect(runs).toHaveLength(1);
+		expect(runs[0]?.status).toBe("ok");
+		expect(runs[0]?.taskId).toBe("t1");
+	});
+
+	it("stale_timeout when orchestrator exceeds executionTimeoutMs — aborts via signal", async () => {
+		seedRoutine();
+		const orch = makeCompletingOrch({ delayMs: 5_000 });
+		const engine = new RoutinesEngine({
+			dir: tmp,
+			orchestrator: orch,
+			cronImpl: makeCronImpl().impl,
+			executionTimeoutMs: 30,
+		});
+		await engine.load();
+		await engine.runNow("r");
+		const runs = engine.getRuns("r");
+		expect(runs[0]?.status).toBe("stale_timeout");
+		expect(runs[0]?.error).toMatch(/exceeded/);
+	});
+
+	it("run history caps at 15 entries (oldest drops first)", async () => {
+		seedRoutine();
+		const orch = makeCompletingOrch({ endReason: "completed" });
+		const engine = new RoutinesEngine({
+			dir: tmp,
+			orchestrator: orch,
+			cronImpl: makeCronImpl().impl,
+		});
+		await engine.load();
+		for (let i = 0; i < 20; i++) {
+			await engine.runNow("r");
+		}
+		const runs = engine.getRuns("r");
+		expect(runs).toHaveLength(15);
+		expect(engine.list()[0]?.runCount).toBe(15);
+	});
+
+	it("falls back to startTask when runToCompletion is not provided (legacy)", async () => {
+		seedRoutine();
+		const orch = fakeOrch();
+		const engine = new RoutinesEngine({
+			dir: tmp,
+			orchestrator: orch,
+			cronImpl: makeCronImpl().impl,
+		});
+		await engine.load();
+		await engine.runNow("r");
+		expect(orch.calls).toEqual(["do-something"]);
+		const runs = engine.getRuns("r");
+		expect(runs).toHaveLength(1);
+		expect(runs[0]?.status).toBe("ok");
+	});
+
+	it("run history survives reload() from disk", async () => {
+		seedRoutine();
+		const orch = makeCompletingOrch({ endReason: "completed" });
+		const engine = new RoutinesEngine({
+			dir: tmp,
+			orchestrator: orch,
+			cronImpl: makeCronImpl().impl,
+		});
+		await engine.load();
+		await engine.runNow("r");
+		await engine.runNow("r");
+		expect(engine.getRuns("r")).toHaveLength(2);
+		await engine.load(); // simulate user edits yaml on disk
+		expect(engine.getRuns("r")).toHaveLength(2);
+	});
+
+	it("failed endReason records error status", async () => {
+		seedRoutine();
+		const orch = makeCompletingOrch({ endReason: "failed" });
+		const engine = new RoutinesEngine({
+			dir: tmp,
+			orchestrator: orch,
+			cronImpl: makeCronImpl().impl,
+		});
+		await engine.load();
+		await engine.runNow("r");
+		expect(engine.getRuns("r")[0]?.status).toBe("error");
+	});
+
+	it("orchestrator error message is surfaced into run history", async () => {
+		seedRoutine();
+		const orch: RoutineOrchestrator = {
+			async startTask() {
+				return "legacy";
+			},
+			async runToCompletion() {
+				return {
+					taskId: "t-fail",
+					endReason: "failed",
+					durationMs: 5,
+					error: "rate_limit_exceeded",
+				};
+			},
+		};
+		const engine = new RoutinesEngine({
+			dir: tmp,
+			orchestrator: orch,
+			cronImpl: makeCronImpl().impl,
+		});
+		await engine.load();
+		await engine.runNow("r");
+		const run = engine.getRuns("r")[0];
+		expect(run?.status).toBe("error");
+		expect(run?.error).toBe("rate_limit_exceeded");
+	});
+});

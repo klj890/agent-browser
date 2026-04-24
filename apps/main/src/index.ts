@@ -57,7 +57,11 @@ import { SyncEngine } from "./sync-engine.js";
 import { HttpSyncTransport, NoopSyncTransport } from "./sync-transport-http.js";
 import type { TabManager as TabManagerType } from "./tab-manager.js";
 import { TabManager } from "./tab-manager.js";
-import { TaskStateStore } from "./task-state.js";
+import {
+	isTerminalTaskStatus,
+	TaskStateStore,
+	type TaskStatus,
+} from "./task-state.js";
 import { ToolResultStorage } from "./tool-result-storage.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -227,6 +231,15 @@ function createOrchestrator(deps: OrchestratorDeps): AgentOrchestrator & {
 		prompt: string,
 		target: (chunk: StreamChunk) => void,
 	) => Promise<string>;
+	runBackgroundTaskToCompletion: (
+		prompt: string,
+		opts?: { signal?: AbortSignal; scheduledTask?: boolean },
+	) => Promise<{
+		taskId: string;
+		endReason: "completed" | "failed" | "killed" | "budget_exceeded";
+		durationMs: number;
+		error?: string;
+	}>;
 } {
 	const active: { host?: AgentHost; taskId?: string } = {};
 	return {
@@ -240,6 +253,83 @@ function createOrchestrator(deps: OrchestratorDeps): AgentOrchestrator & {
 			target: (chunk: StreamChunk) => void,
 		) {
 			return runOneTask(deps, prompt, target, null);
+		},
+		/**
+		 * Background variant that awaits a terminal TaskStateStore transition
+		 * before resolving. Wires AbortSignal → taskStore.abort so a routine's
+		 * stale-timeout actually kills the Agent rather than just orphaning
+		 * the in-flight IIFE.
+		 *
+		 * `scheduledTask` flag is accepted for future use (restricted tool
+		 * set for background routines) — currently unused but kept at the
+		 * boundary so callers don't have to re-plumb later.
+		 */
+		async runBackgroundTaskToCompletion(prompt, opts) {
+			const startedAt = Date.now();
+			// Capture error chunks so the routine's run history can record
+			// the actual failure message, not a generic 'failed'. Keep the
+			// last one — for the streams runOneTask produces, only a single
+			// error chunk ever fires (from the IIFE's catch block, right
+			// before `done`), so last-wins and first-wins behave identically.
+			// Last-wins is the more conventional stream-drain convention and
+			// matches what a debugger would tail.
+			let errorMessage: string | undefined;
+			const capture = (c: StreamChunk) => {
+				if (c.type === "error") errorMessage = c.message;
+			};
+			const taskId = await runOneTask(deps, prompt, capture, null);
+			const onAbort = () => {
+				try {
+					deps.taskStore.abort(taskId);
+				} catch {
+					/* already terminal */
+				}
+			};
+			if (opts?.signal) {
+				if (opts.signal.aborted) {
+					onAbort();
+				} else {
+					opts.signal.addEventListener("abort", onAbort, { once: true });
+				}
+			}
+			// Subscribe BEFORE checking current status. Otherwise a terminal
+			// transition landing between `.get()` and `onChange()` would be
+			// missed (onChange only fires on new transitions, not on the
+			// current state) and the promise would hang forever.
+			return await new Promise((resolve) => {
+				let settled = false;
+				const finish = (status: TaskStatus) => {
+					if (settled) return;
+					settled = true;
+					unsub();
+					// Detach abort listener on normal completion too — the
+					// { once: true } option only fires on abort, not on
+					// Promise resolution, so without this the closure (and
+					// taskStore reference) would pin until the caller's
+					// AbortController itself is collected.
+					opts?.signal?.removeEventListener("abort", onAbort);
+					resolve({
+						taskId,
+						endReason: status as
+							| "completed"
+							| "failed"
+							| "killed"
+							| "budget_exceeded",
+						durationMs: Date.now() - startedAt,
+						error: errorMessage,
+					});
+				};
+				const unsub = deps.taskStore.onChange((task) => {
+					if (task.id !== taskId) return;
+					if (!isTerminalTaskStatus(task.status)) return;
+					finish(task.status);
+				});
+				// Now that we're listening, sample current state — if the task
+				// already raced past us into terminal before we subscribed,
+				// resolve from here.
+				const current = deps.taskStore.get(taskId);
+				if (isTerminalTaskStatus(current.status)) finish(current.status);
+			});
 		},
 		cancel(taskId: string) {
 			if (active.taskId === taskId) active.host?.cancel();
@@ -546,6 +636,11 @@ async function createMainWindow(
 			// a cron tick never interrupts the user's live sidebar session.
 			startTask: (prompt, target) =>
 				orchestrator.startBackgroundTask(prompt, target),
+			// New in P2 §2.5: await terminal task state so the engine can
+			// enforce a stale timeout (default 10 min) and accumulate a real
+			// run history, not just an optimistic "started" stamp.
+			runToCompletion: (prompt, opts) =>
+				orchestrator.runBackgroundTaskToCompletion(prompt, opts),
 		},
 	});
 	void routinesEngine.load().then(() => routinesEngine.start());
