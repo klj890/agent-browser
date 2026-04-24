@@ -570,23 +570,26 @@ const nodeFsDriver: FsDriver = {
  * persistent memory will ride through the same confirmation path that
  * §2.2's SOUL.md auto-evolution uses when that ships.
  */
+const MemorySearchInput = z.object({
+	query: z.string().min(1),
+	limit: z.number().int().positive().max(50).optional(),
+});
+const MemoryReadDailyInput = z.object({
+	date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+});
+
 function createMemorySkills(memory: MemoryStore): Skill[] {
 	return [
 		{
 			name: "memory_search",
 			description:
 				"Search the user's memory (CORE.md + daily notes) for lines matching given keywords. Returns up to 10 hits with source/section/line. Keywords are AND-matched case-insensitively.",
-			inputSchema: z.object({
-				query: z.string().min(1),
-				limit: z.number().int().positive().max(50).optional(),
-			}),
+			inputSchema: MemorySearchInput,
 			execute: async (input) => {
-				const parsed = z
-					.object({
-						query: z.string().min(1),
-						limit: z.number().int().positive().max(50).optional(),
-					})
-					.parse(input);
+				// input already ran through AgentHost's Zod gate, so we don't
+				// re-parse here — re-parsing duplicated the schema in two
+				// places and drifted silently in review iterations.
+				const parsed = input as z.infer<typeof MemorySearchInput>;
 				return { hits: await memory.search(parsed.query, parsed.limit) };
 			},
 		},
@@ -601,11 +604,9 @@ function createMemorySkills(memory: MemoryStore): Skill[] {
 			name: "memory_read_daily",
 			description:
 				"Read one day's notes file by ISO date (YYYY-MM-DD). Returns an empty string if that day has no entries.",
-			inputSchema: z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }),
+			inputSchema: MemoryReadDailyInput,
 			execute: async (input) => {
-				const parsed = z
-					.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) })
-					.parse(input);
+				const parsed = input as z.infer<typeof MemoryReadDailyInput>;
 				return { content: await memory.readDaily(parsed.date) };
 			},
 		},

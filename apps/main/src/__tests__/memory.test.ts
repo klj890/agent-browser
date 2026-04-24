@@ -144,12 +144,16 @@ describe("MemoryStore — search", () => {
 		expect(hits[0]?.line).toContain("Alice works on payments");
 	});
 
-	it("ranks multi-keyword hits above single-keyword hits", async () => {
+	it("strict AND: only lines containing ALL keywords are returned", async () => {
 		const mem = new MemoryStore({ dir });
-		await mem.writeCore("- alpha\n- alpha beta\n- gamma\n");
+		await mem.writeCore("- alpha\n- alpha beta\n- gamma\n- alpha gamma beta\n");
 		const hits = await mem.search("alpha beta");
-		expect(hits[0]?.matchedKeywords).toBe(2);
-		expect(hits[1]?.matchedKeywords).toBe(1);
+		// OR-match would return 3; AND-match keeps only lines with both.
+		expect(hits).toHaveLength(2);
+		for (const hit of hits) {
+			expect(hit.line.toLowerCase()).toContain("alpha");
+			expect(hit.line.toLowerCase()).toContain("beta");
+		}
 	});
 
 	it("searches across CORE and daily; CORE wins same-score tie-break", async () => {

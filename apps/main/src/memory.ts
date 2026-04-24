@@ -26,7 +26,14 @@
  *   - `MemoryStore.writeCore / appendDaily` are exported so IPC handlers
  *     (next increment) can plug the UI directly. No new tools exposed here.
  */
-import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	readdir,
+	readFile,
+	stat,
+	unlink,
+	writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 
 export interface MemoryStoreOpts {
@@ -94,12 +101,17 @@ export class MemoryStore {
 	 */
 	async readCore(): Promise<string> {
 		try {
-			const raw = await readFile(this.corePath);
-			if (raw.byteLength > this.maxCoreBytes) {
+			// Size-gate BEFORE reading so an accidentally-bloated file (e.g.
+			// a rogue writer appended GB of junk) doesn't page into memory
+			// just to fail the guard. `stat` is cheap; readFile is not when
+			// the file is hostile.
+			const s = await stat(this.corePath);
+			if (s.size > this.maxCoreBytes) {
 				throw new Error(
-					`CORE.md exceeds ${this.maxCoreBytes} bytes (${raw.byteLength})`,
+					`CORE.md exceeds ${this.maxCoreBytes} bytes (${s.size})`,
 				);
 			}
+			const raw = await readFile(this.corePath);
 			return new TextDecoder("utf-8").decode(raw);
 		} catch (err) {
 			if (!isEnoent(err)) throw err;
@@ -183,14 +195,27 @@ export class MemoryStore {
 	): Promise<MemorySearchHit[]> {
 		const keywords = tokenise(query);
 		if (keywords.length === 0) return [];
-		const hits: MemorySearchHit[] = [];
+		// Read CORE and every daily file in parallel. With the default
+		// 30-day retention, the old sequential loop did 30 round-trips in
+		// the worst case — one missing fsync pause and the Agent step loop
+		// stalled visibly. Promise.all caps it at a single wall-clock
+		// latency, bounded only by how many files the kernel will open
+		// concurrently.
+		const [coreText, dates] = await Promise.all([
+			this.readCore().catch(() => ""),
+			this.listDailyDates(),
+		]);
+		const dailyResults = await Promise.all(
+			dates.map(async (date) => {
+				const text = await this.readDaily(date);
+				return scanSource(text, date, keywords);
+			}),
+		);
 		// CORE first so equally-scored hits prefer permanent facts.
-		const coreText = await this.readCore().catch(() => "");
-		hits.push(...scanSource(coreText, "core", keywords));
-		for (const date of await this.listDailyDates()) {
-			const text = await this.readDaily(date);
-			hits.push(...scanSource(text, date, keywords));
-		}
+		const hits: MemorySearchHit[] = [
+			...scanSource(coreText, "core", keywords),
+			...dailyResults.flat(),
+		];
 		hits.sort((a, b) => {
 			if (b.matchedKeywords !== a.matchedKeywords) {
 				return b.matchedKeywords - a.matchedKeywords;
@@ -290,7 +315,14 @@ function scanSource(
 			const lower = line.toLowerCase();
 			let matched = 0;
 			for (const kw of keywords) if (lower.includes(kw)) matched++;
-			if (matched > 0) {
+			// Strict AND: the tool contract (`memory_search` description) says
+			// "keywords are AND-matched". Returning lines that matched just
+			// one of three requested terms floods the LLM context with
+			// false positives and breaks the user's mental model of the
+			// query. matchedKeywords is still carried for the ordering step
+			// (all results now have the same count by construction, but the
+			// field remains useful once partial-match modes get added).
+			if (matched === keywords.length) {
 				out.push({
 					source,
 					section: sec.heading,
