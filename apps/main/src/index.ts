@@ -266,16 +266,16 @@ function createOrchestrator(deps: OrchestratorDeps): AgentOrchestrator & {
 		 */
 		async runBackgroundTaskToCompletion(prompt, opts) {
 			const startedAt = Date.now();
-			// Capture the first error chunk so the routine's run history
-			// can record the actual failure message, not a generic 'failed'.
-			// Subsequent error chunks are ignored — we only surface the
-			// precipitating error, and tool errors that the agent recovers
-			// from would otherwise clobber the real one.
+			// Capture error chunks so the routine's run history can record
+			// the actual failure message, not a generic 'failed'. Keep the
+			// last one — for the streams runOneTask produces, only a single
+			// error chunk ever fires (from the IIFE's catch block, right
+			// before `done`), so last-wins and first-wins behave identically.
+			// Last-wins is the more conventional stream-drain convention and
+			// matches what a debugger would tail.
 			let errorMessage: string | undefined;
 			const capture = (c: StreamChunk) => {
-				if (errorMessage == null && c.type === "error") {
-					errorMessage = c.message;
-				}
+				if (c.type === "error") errorMessage = c.message;
 			};
 			const taskId = await runOneTask(deps, prompt, capture, null);
 			const onAbort = () => {
