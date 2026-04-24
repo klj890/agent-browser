@@ -27,12 +27,25 @@ export interface PersonaFrontmatter {
 	allowedTools?: string[];
 }
 
+/**
+ * Provenance attached to a persona so the UI can badge it and the user can
+ * unsubscribe a whole source. Local file-system personas get `kind: 'local'`
+ * and no url/token. Undefined on legacy personas loaded before P2-19.
+ */
+export interface PersonaSourceRef {
+	id: string;
+	kind: "team" | "public" | "local";
+	name: string;
+}
+
 export interface Persona {
 	slug: string;
 	name: string;
 	description: string;
 	contentMd: string;
 	frontmatter: PersonaFrontmatter;
+	/** Where this persona came from. Added in P2-19. */
+	source?: PersonaSourceRef;
 }
 
 // ---------------------------------------------------------------------------
@@ -209,14 +222,47 @@ function hostFromUrl(url: string): string | null {
 
 export class PersonaManager {
 	private readonly bySlug = new Map<string, Persona>();
+	/**
+	 * Shadow copy of every locally-registered persona (loadFromDir or
+	 * explicit register without a remote source). If a remote sync later
+	 * shadows one of these slugs and then the remote source is removed,
+	 * clearRemote() re-hydrates from here so the local definition isn't
+	 * lost until app restart.
+	 */
+	private readonly localBySlug = new Map<string, Persona>();
 
 	register(p: Persona): void {
+		// Treat missing source as "local" too so legacy callers
+		// (tests, in-process bootstrapping) keep their personas after
+		// clearRemote() sweeps.
+		if (!p.source || p.source.kind === "local") {
+			this.localBySlug.set(p.slug, p);
+		}
 		this.bySlug.set(p.slug, p);
 	}
 
 	/** Bulk upsert — used by persona-sync to inject cache/remote personas. */
 	upsert(personas: Persona[]): void {
 		for (const p of personas) this.bySlug.set(p.slug, p);
+	}
+
+	/**
+	 * Drop every persona whose source is a remote feed (team/public) and
+	 * re-hydrate any local persona whose slug was shadowed by a remote
+	 * write. Called by persona-sync before re-injecting the full cache so
+	 * that unsubscribing a source is reflected immediately without
+	 * requiring an app restart, and so a slug collision between a local
+	 * file and a remote feed doesn't permanently evict the local entry.
+	 */
+	clearRemote(): void {
+		for (const [slug, p] of this.bySlug) {
+			if (p.source?.kind === "team" || p.source?.kind === "public") {
+				this.bySlug.delete(slug);
+			}
+		}
+		for (const [slug, p] of this.localBySlug) {
+			if (!this.bySlug.has(slug)) this.bySlug.set(slug, p);
+		}
 	}
 
 	/**
@@ -277,6 +323,10 @@ export class PersonaManager {
 			const slug = name.slice(0, -3);
 			const source = await readFile(path.join(dir, name), "utf8");
 			const persona = parsePersona(slug, source);
+			// Stamp file-system personas with the `local` source so the UI can
+			// tell them apart from team/public and so unsubscribing a remote
+			// source never wipes the user's own files.
+			persona.source = { id: "local", kind: "local", name: "Local" };
 			this.register(persona);
 			loaded.push(persona);
 		}

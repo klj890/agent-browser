@@ -218,4 +218,37 @@ CREATE INDEX IF NOT EXISTS bookmark_tombstones_deleted
   ON bookmark_tombstones(deleted_at ASC, id ASC);
 `,
 	},
+	{
+		name: "008_persona_sources.sql",
+		sql: `
+CREATE TABLE IF NOT EXISTS persona_sources (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  url TEXT NOT NULL,
+  token TEXT,
+  kind TEXT NOT NULL CHECK (kind IN ('team', 'public')),
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS personas_cache_new (
+  source_id TEXT NOT NULL DEFAULT 'default',
+  slug TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  domains_json TEXT NOT NULL DEFAULT '[]',
+  allowed_tools_json TEXT,
+  content_md TEXT NOT NULL DEFAULT '',
+  last_updated INTEGER NOT NULL,
+  PRIMARY KEY (source_id, slug)
+);
+INSERT OR IGNORE INTO personas_cache_new
+  (source_id, slug, name, description, domains_json, allowed_tools_json, content_md, last_updated)
+SELECT 'default', slug, name, description, domains_json, allowed_tools_json, content_md, last_updated
+FROM personas_cache;
+DROP TABLE personas_cache;
+ALTER TABLE personas_cache_new RENAME TO personas_cache;
+CREATE INDEX IF NOT EXISTS personas_cache_updated ON personas_cache(last_updated DESC);
+CREATE INDEX IF NOT EXISTS personas_cache_source ON personas_cache(source_id);
+`,
+	},
 ];
