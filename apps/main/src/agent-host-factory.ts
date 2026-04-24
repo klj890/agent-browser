@@ -351,14 +351,13 @@ export function createTabControllerForAgent(
 			}
 		},
 		canClose(id) {
-			const tab = tabManager.list().find((t) => t.id === id);
-			return tab?.openedByAgent === true;
+			return tabManager.getSummary(id)?.openedByAgent === true;
 		},
 		exists(id) {
-			return tabManager.list().some((t) => t.id === id);
+			return tabManager.getSummary(id) !== undefined;
 		},
 		setAgentActive(id) {
-			if (!tabManager.list().some((t) => t.id === id)) return;
+			if (!tabManager.getSummary(id)) return;
 			activeAgentTab.id = id;
 		},
 		getAgentActiveId() {
