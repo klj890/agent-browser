@@ -117,10 +117,14 @@ export class McpExternalClient {
 			);
 		}
 		const remoteName = prefixedName.slice(expected.length);
-		const result = (await this.client.callTool({
-			name: remoteName,
-			arguments: args,
-		})) as { content?: unknown; isError?: boolean };
+		// callTool timeout: a hung remote would pin the Agent step loop
+		// indefinitely otherwise. Use per-spec override or 10s default.
+		// SDK's RequestOptions.timeout enforces this at the protocol level.
+		const result = (await this.client.callTool(
+			{ name: remoteName, arguments: args },
+			undefined,
+			{ timeout: this.spec.timeoutMs ?? 10_000 },
+		)) as { content?: unknown; isError?: boolean };
 		return {
 			content: result.content ?? [],
 			isError: result.isError === true,
@@ -145,6 +149,20 @@ export class McpExternalClient {
 			? { headers: { Authorization: this.spec.authorization } }
 			: {};
 		if (this.spec.transport === "sse") {
+			// SSEClientTransport uses the global `EventSource`. Node.js
+			// didn't expose one until 22; Electron main's bundled Node
+			// varies. Fail fast with an actionable message rather than
+			// letting the SDK throw a cryptic reference error mid-connect.
+			if (
+				typeof (globalThis as { EventSource?: unknown }).EventSource !==
+				"function"
+			) {
+				throw new Error(
+					"mcp-external: 'sse' transport requires a global EventSource; " +
+						"either upgrade to Node.js ≥22 or install the `eventsource` " +
+						"npm package and assign it to globalThis.EventSource before boot.",
+				);
+			}
 			return new SSEClientTransport(new URL(this.spec.url), {
 				// SSE transport uses eventSourceInit for stream setup; auth
 				// header comes via requestInit for the POST channel.

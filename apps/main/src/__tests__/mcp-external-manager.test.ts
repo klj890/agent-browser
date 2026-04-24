@@ -198,6 +198,76 @@ describe("McpExternalManager", () => {
 		await mgr.stop();
 		expect(mgr.skills()).toHaveLength(0);
 	});
+
+	it("skill description embeds the remote JSON Schema so LLM knows arg shape", async () => {
+		// Build a minimal stand-in that matches McpExternalClient's public
+		// surface but emits a tool with a real JSON Schema. Using a bare
+		// object avoids polluting FakeClient with a schema knob the other
+		// tests don't need.
+		const schemaClient = {
+			id: "s",
+			prefix: () => "s",
+			isConnected: () => true,
+			listTools: (): McpRemoteTool[] => [
+				{
+					name: "s__send",
+					remoteName: "send",
+					description: "Send a message",
+					inputSchema: {
+						type: "object",
+						properties: { to: { type: "string" } },
+						required: ["to"],
+					},
+				},
+			],
+			connect: async () => {},
+			callTool: async (): Promise<McpCallResult> => ({
+				content: [],
+				isError: false,
+			}),
+			disconnect: async () => {},
+		};
+		const mgr = new McpExternalManager({
+			servers: [spec("s")],
+			clientFactory: (() =>
+				schemaClient as unknown as import("../mcp-external-client.js").McpExternalClient) as unknown as ConstructorParameters<
+				typeof McpExternalManager
+			>[0]["clientFactory"],
+		});
+		await mgr.start();
+		const skill = mgr.skills()[0];
+		expect(skill?.description).toContain("Send a message");
+		expect(skill?.description).toContain("Arguments schema");
+		expect(skill?.description).toContain('"required":["to"]');
+	});
+});
+
+describe("McpExternalClient transport safeguards", () => {
+	it("refuses to build SSE transport when global EventSource is missing", async () => {
+		const { McpExternalClient } = await import("../mcp-external-client.js");
+		const hadEventSource =
+			typeof (globalThis as { EventSource?: unknown }).EventSource ===
+			"function";
+		const saved = (globalThis as { EventSource?: unknown }).EventSource;
+		// biome-ignore lint/performance/noDelete: test needs the reference gone
+		delete (globalThis as { EventSource?: unknown }).EventSource;
+		try {
+			const c = new McpExternalClient({
+				spec: {
+					id: "x",
+					name: "x",
+					transport: "sse",
+					url: "https://x.example.com/sse",
+					enabled: true,
+				},
+			});
+			await expect(c.connect()).rejects.toThrow(/EventSource/);
+		} finally {
+			if (hadEventSource) {
+				(globalThis as { EventSource?: unknown }).EventSource = saved;
+			}
+		}
+	});
 });
 
 describe("isExternalMcpSkillName", () => {

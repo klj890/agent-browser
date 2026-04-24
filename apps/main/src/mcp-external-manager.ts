@@ -113,8 +113,19 @@ export class McpExternalManager {
 			for (const tool of client.listTools()) {
 				skills.push({
 					name: tool.name,
-					description: tool.description,
-					inputSchema: z.unknown(),
+					// Append the remote's JSON Schema to the description so
+					// the LLM sees the expected shape even though our Zod
+					// input is deliberately permissive. Runtime-compiling
+					// arbitrary JSON Schema to Zod is out of scope here;
+					// the remote server already validates the final args.
+					description: embedSchemaInDescription(
+						tool.description,
+						tool.inputSchema,
+					),
+					// `.passthrough()` accepts any object, which mirrors the
+					// MCP spec (arguments is `object`). We don't use
+					// `z.unknown()` because Skill callers expect a record.
+					inputSchema: z.object({}).passthrough(),
 					execute: async (input) => {
 						const args =
 							input && typeof input === "object"
@@ -141,16 +152,39 @@ export class McpExternalManager {
 		return Array.from(this.statuses.values()).map((s) => ({ ...s }));
 	}
 
-	private async withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-		return Promise.race([
-			p,
-			new Promise<T>((_, reject) =>
-				setTimeout(
-					() =>
-						reject(new Error(`mcp-external connect timed out after ${ms}ms`)),
-					ms,
-				),
-			),
-		]);
+	private async withTimeout<Tp>(p: Promise<Tp>, ms: number): Promise<Tp> {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timeoutP = new Promise<Tp>((_, reject) => {
+			timer = setTimeout(
+				() => reject(new Error(`mcp-external connect timed out after ${ms}ms`)),
+				ms,
+			);
+		});
+		// `finally` clears the timer whether `p` won or threw — otherwise the
+		// handle would keep the event loop alive past the winner's settlement.
+		return Promise.race([p, timeoutP]).finally(() => {
+			if (timer) clearTimeout(timer);
+		});
 	}
+}
+
+/**
+ * Prepend the remote tool's JSON Schema to the description so the LLM can
+ * read it and emit well-typed args even though our Skill-level Zod is a
+ * permissive passthrough. Truncates large schemas to avoid blowing up the
+ * prompt — any useful MCP tool's schema fits in 1KB.
+ */
+const SCHEMA_MAX_CHARS = 1024;
+function embedSchemaInDescription(base: string, schema: unknown): string {
+	if (schema == null || typeof schema !== "object") return base;
+	let serialised: string;
+	try {
+		serialised = JSON.stringify(schema);
+	} catch {
+		return base;
+	}
+	if (serialised.length > SCHEMA_MAX_CHARS) {
+		serialised = `${serialised.slice(0, SCHEMA_MAX_CHARS)}…(truncated)`;
+	}
+	return `${base}\n\nArguments schema (JSON Schema):\n${serialised}`;
 }
