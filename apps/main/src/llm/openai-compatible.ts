@@ -75,9 +75,11 @@ export class OpenAiCompatProvider implements LlmProvider {
 	constructor(opts: OpenAiCompatOpts) {
 		this.name = opts.name;
 		this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
-		// Empty string normalises to undefined so the header-omit branch
-		// triggers for both `apiKey: ""` and `apiKey: undefined` callers.
-		this.apiKey = opts.apiKey || undefined;
+		// Empty or whitespace-only string normalises to undefined so the
+		// header-omit branch triggers for `""`, `"   "`, and `undefined`
+		// alike. Without trim, a trailing newline from an env file would
+		// produce `Authorization: Bearer \n` and local servers 401.
+		this.apiKey = opts.apiKey?.trim() || undefined;
 		this.model = opts.model;
 		this.timeoutMs = opts.timeoutMs ?? 60_000;
 		this.fetchImpl = opts.fetchImpl ?? fetch;

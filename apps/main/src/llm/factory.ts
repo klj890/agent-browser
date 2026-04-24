@@ -135,7 +135,9 @@ export function buildProviderChain(
 			new OpenAiCompatProvider({
 				name: "ollama",
 				baseUrl: ollamaUrl,
-				model: env.OLLAMA_MODEL ?? "llama3.1",
+				// `||` (not `??`) so that `OLLAMA_MODEL=""` falls back too —
+				// empty env vars shouldn't reach the provider as a model name.
+				model: env.OLLAMA_MODEL || "llama3.1",
 				fetchImpl,
 			}),
 		);

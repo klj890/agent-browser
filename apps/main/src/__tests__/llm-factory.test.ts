@@ -191,6 +191,34 @@ describe("OpenAiCompatProvider — local mode (no apiKey)", () => {
 		expect(captured[0]?.Authorization).toBe("Bearer sk-xyz");
 	});
 
+	it("trims whitespace-only apiKey to undefined (no 'Bearer   ' header)", async () => {
+		const captured: Array<Record<string, string>> = [];
+		const fakeFetch: typeof fetch = async (_url, init) => {
+			captured.push((init?.headers as Record<string, string>) ?? {});
+			return new Response("data: [DONE]\n\n", {
+				status: 200,
+				headers: { "Content-Type": "text/event-stream" },
+			});
+		};
+		const { OpenAiCompatProvider } = await import(
+			"../llm/openai-compatible.js"
+		);
+		const p = new OpenAiCompatProvider({
+			name: "local",
+			baseUrl: "http://localhost:11434/v1",
+			apiKey: "   \n",
+			model: "llama3.1",
+			fetchImpl: fakeFetch,
+		});
+		for await (const _c of p.stream({
+			messages: [{ role: "user", content: "hi" }],
+			tools: [],
+		})) {
+			/* drain */
+		}
+		expect(captured[0]?.Authorization).toBeUndefined();
+	});
+
 	it("treats apiKey='' same as undefined (no Authorization header)", async () => {
 		const captured: Array<Record<string, string>> = [];
 		const fakeFetch: typeof fetch = async (_url, init) => {
