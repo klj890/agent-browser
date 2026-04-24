@@ -177,6 +177,8 @@ export async function createAgentHostForTab(
 		allowedDirs: policy.fsSandboxDirs.map((d) => path.resolve(d)),
 		driver: nodeFsDriver,
 		resolve: (p) => path.resolve(p),
+		dirname: (p) => path.dirname(p),
+		sep: path.sep,
 	});
 	const allSkills = [
 		...createBrowserToolsSkills(ctx),
@@ -471,13 +473,40 @@ export function createTabControllerForAgent(
  */
 const nodeFsDriver: FsDriver = {
 	async readFile(p) {
-		return readFile(p);
+		const buf = await readFile(p);
+		// Node Buffer extends Uint8Array, but we return a plain view so the
+		// skill layer's Uint8Array-only contract holds if the driver is
+		// ever reused in a non-Node environment.
+		return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 	},
-	async writeFile(p, data) {
-		await writeFile(p, data);
+	async writeFile(p, data, opts) {
+		// Pass the `flag` through so fs_write's `createOnly` ⇒ `wx`
+		// piggybacks on the OS-level atomic "fail if exists" behaviour.
+		await writeFile(p, data, { flag: opts?.flag ?? "w" });
 	},
-	async readdir(p) {
-		return readdir(p);
+	async readdirDetailed(p) {
+		const dirents = await readdir(p, { withFileTypes: true });
+		// Single stat per entry is unavoidable for size — `Dirent` doesn't
+		// carry size. Still far better than the previous readdir + stat
+		// pattern because isFile/isDirectory come from the dirent, not
+		// another stat call, so we halve the syscall count in practice
+		// and get correct results on symlinks (they appear as file or dir
+		// per OS convention instead of generic "other").
+		const out = [];
+		for (const d of dirents) {
+			try {
+				const s = await stat(`${p}/${d.name}`);
+				out.push({
+					name: d.name,
+					isFile: d.isFile(),
+					isDirectory: d.isDirectory(),
+					size: s.size,
+				});
+			} catch {
+				// Vanished between readdir and stat — silently skip.
+			}
+		}
+		return out;
 	},
 	async stat(p) {
 		const s = await stat(p);

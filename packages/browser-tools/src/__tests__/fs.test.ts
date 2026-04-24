@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	createFsSkills,
 	type FsDriver,
@@ -15,14 +15,20 @@ import {
 function memDriver(
 	initial: Record<string, string | "<dir>">,
 	opts: { symlinks?: Record<string, string> } = {},
-): FsDriver & { files: Map<string, Buffer | "<dir>"> } {
-	const files = new Map<string, Buffer | "<dir>">(
+): FsDriver & { files: Map<string, Uint8Array | "<dir>"> } {
+	const enc = new TextEncoder();
+	const files = new Map<string, Uint8Array | "<dir>">(
 		Object.entries(initial).map(([k, v]) => [
 			k,
-			v === "<dir>" ? "<dir>" : Buffer.from(v, "utf8"),
+			v === "<dir>" ? "<dir>" : enc.encode(v),
 		]),
 	);
 	const symlinks = new Map<string, string>(Object.entries(opts.symlinks ?? {}));
+	const isDirKey = (p: string): boolean => {
+		if (files.get(p) === "<dir>") return true;
+		for (const k of files.keys()) if (k.startsWith(`${p}/`)) return true;
+		return false;
+	};
 	return {
 		files,
 		async readFile(p) {
@@ -32,33 +38,49 @@ function memDriver(
 			}
 			return v;
 		},
-		async writeFile(p, data) {
-			files.set(
-				p,
-				Buffer.isBuffer(data) ? data : Buffer.from(String(data), "utf8"),
-			);
+		async writeFile(p, data, optsInner) {
+			if (optsInner?.flag === "wx" && files.has(p)) {
+				throw Object.assign(new Error(`EEXIST: ${p}`), { code: "EEXIST" });
+			}
+			files.set(p, data);
 		},
-		async readdir(p) {
+		async readdirDetailed(p) {
 			const prefix = `${p}/`;
 			const names = new Set<string>();
 			for (const key of files.keys()) {
 				if (!key.startsWith(prefix)) continue;
 				const rest = key.slice(prefix.length);
 				if (rest.length === 0) continue;
-				// Only immediate child, not nested grandchildren.
 				const slash = rest.indexOf("/");
 				names.add(slash === -1 ? rest : rest.slice(0, slash));
 			}
-			return Array.from(names);
+			const out: {
+				name: string;
+				isFile: boolean;
+				isDirectory: boolean;
+				size: number;
+			}[] = [];
+			for (const name of names) {
+				const child = `${p}/${name}`;
+				const v = files.get(child);
+				if (v === "<dir>" || isDirKey(child)) {
+					out.push({ name, isFile: false, isDirectory: true, size: 0 });
+				} else if (v instanceof Uint8Array) {
+					out.push({
+						name,
+						isFile: true,
+						isDirectory: false,
+						size: v.byteLength,
+					});
+				}
+			}
+			return out;
 		},
 		async stat(p) {
 			const v = files.get(p);
 			if (v === undefined) {
-				// A directory that has children but no explicit entry.
-				for (const key of files.keys()) {
-					if (key.startsWith(`${p}/`)) {
-						return { isFile: false, isDirectory: true, size: 0 };
-					}
+				if (isDirKey(p)) {
+					return { isFile: false, isDirectory: true, size: 0 };
 				}
 				throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
 			}
@@ -84,6 +106,11 @@ function mkSandbox(
 		allowedDirs,
 		driver,
 		resolve: (p) => p,
+		dirname: (p) => {
+			const i = p.lastIndexOf("/");
+			return i <= 0 ? "/" : p.slice(0, i);
+		},
+		sep: "/",
 		...extras,
 	};
 }
@@ -127,6 +154,50 @@ describe("createFsSkills — sandbox", () => {
 		})) as FsReadResult;
 		expect(res.ok).toBe(false);
 		if (!res.ok) expect(res.reason).toBe("not_in_sandbox");
+	});
+
+	it("sandbox root = '/' still gates children correctly (no double-sep bug)", async () => {
+		const driver = memDriver({ "/work/a": "hi" });
+		const skills = createFsSkills(mkSandbox(driver, ["/"]));
+		const res = (await getSkill(skills, "fs_read").execute({
+			path: "/work/a",
+		})) as FsReadResult;
+		expect(res.ok).toBe(true);
+		if (res.ok) expect(res.content).toBe("hi");
+	});
+
+	it("sandbox '/work' does NOT grant access to '/workshop' (prefix vs child distinction)", async () => {
+		const driver = memDriver({
+			"/work": "<dir>",
+			"/workshop/secret": "nope",
+		});
+		const skills = createFsSkills(mkSandbox(driver, ["/work"]));
+		const res = (await getSkill(skills, "fs_read").execute({
+			path: "/workshop/secret",
+		})) as FsReadResult;
+		expect(res.ok).toBe(false);
+		if (!res.ok) expect(res.reason).toBe("not_in_sandbox");
+	});
+
+	it("Windows-style sandbox (sep='\\\\') gates correctly", async () => {
+		const driver = memDriver({
+			"C:\\work\\a.txt": "hi",
+		});
+		const skills = createFsSkills({
+			allowedDirs: ["C:\\work"],
+			driver,
+			resolve: (p) => p,
+			dirname: (p) => {
+				const i = p.lastIndexOf("\\");
+				return i <= 0 ? p : p.slice(0, i);
+			},
+			sep: "\\",
+		});
+		const res = (await getSkill(skills, "fs_read").execute({
+			path: "C:\\work\\a.txt",
+		})) as FsReadResult;
+		expect(res.ok).toBe(true);
+		if (res.ok) expect(res.content).toBe("hi");
 	});
 
 	it("absolute path outside sandbox → rejected", async () => {
@@ -199,7 +270,11 @@ describe("fs_write", () => {
 		})) as FsWriteResult;
 		expect(res.ok).toBe(true);
 		if (res.ok) expect(res.byteSize).toBe(7);
-		expect(driver.files.get("/work/report.md")?.toString()).toBe("# hello");
+		expect(
+			new TextDecoder().decode(
+				driver.files.get("/work/report.md") as Uint8Array,
+			),
+		).toBe("# hello");
 	});
 
 	it("overwrites by default, respects createOnly", async () => {
@@ -214,7 +289,11 @@ describe("fs_write", () => {
 			content: "new",
 		})) as FsWriteResult;
 		expect(ow.ok).toBe(true);
-		expect(driver.files.get("/work/exists.txt")?.toString()).toBe("new");
+		expect(
+			new TextDecoder().decode(
+				driver.files.get("/work/exists.txt") as Uint8Array,
+			),
+		).toBe("new");
 		// createOnly refuses
 		const co = (await getSkill(skills, "fs_write").execute({
 			path: "/work/exists.txt",
@@ -223,7 +302,29 @@ describe("fs_write", () => {
 		})) as FsWriteResult;
 		expect(co.ok).toBe(false);
 		if (!co.ok) expect(co.detail).toMatch(/exists/);
-		expect(driver.files.get("/work/exists.txt")?.toString()).toBe("new");
+		expect(
+			new TextDecoder().decode(
+				driver.files.get("/work/exists.txt") as Uint8Array,
+			),
+		).toBe("new");
+	});
+
+	it("createOnly uses atomic wx flag (TOCTOU-safe) — driver sees flag:'wx'", async () => {
+		const driver = memDriver({ "/work": "<dir>" });
+		const writeSpy = vi.fn(driver.writeFile.bind(driver));
+		driver.writeFile = writeSpy;
+		const skills = createFsSkills(mkSandbox(driver, ["/work"]));
+		const res = (await getSkill(skills, "fs_write").execute({
+			path: "/work/new.txt",
+			content: "x",
+			createOnly: true,
+		})) as FsWriteResult;
+		expect(res.ok).toBe(true);
+		expect(writeSpy).toHaveBeenCalledWith(
+			"/work/new.txt",
+			expect.any(Uint8Array),
+			{ flag: "wx" },
+		);
 	});
 
 	it("refuses oversize content (byte length, not char length)", async () => {

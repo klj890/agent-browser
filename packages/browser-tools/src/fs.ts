@@ -29,11 +29,37 @@
 import { z } from "zod";
 import type { Skill } from "./index.js";
 
-/** Minimal fs interface the skills need. Matches node:fs/promises subset. */
+/**
+ * One fs entry's metadata — all the skill layer ever needs. Mirrors
+ * `node:fs Dirent` + `stat` intersection so production and test drivers
+ * can fill it with one pass instead of stat-per-entry.
+ */
+export interface FsDirEntry {
+	name: string;
+	isFile: boolean;
+	isDirectory: boolean;
+	size: number;
+}
+
+/**
+ * Minimal fs interface the skills need. Return types avoid Node globals
+ * so this module stays consumable from renderer / browser contexts —
+ * Node-backed callers wrap buffers into Uint8Array at the driver edge.
+ */
 export interface FsDriver {
-	readFile(p: string): Promise<Buffer>;
-	writeFile(p: string, data: string | Buffer): Promise<void>;
-	readdir(p: string): Promise<string[]>;
+	readFile(p: string): Promise<Uint8Array>;
+	/**
+	 * Write bytes. `flag: "wx"` must fail with EEXIST when the target
+	 * exists — this is the atomic primitive the `createOnly` skill option
+	 * piggybacks on, avoiding the TOCTOU window between stat-and-write.
+	 */
+	writeFile(
+		p: string,
+		data: Uint8Array,
+		opts?: { flag?: "w" | "wx" },
+	): Promise<void>;
+	/** Return entries + their dirent-style type + size in ONE pass. */
+	readdirDetailed(p: string): Promise<FsDirEntry[]>;
 	stat(p: string): Promise<{
 		isFile: boolean;
 		isDirectory: boolean;
@@ -58,12 +84,20 @@ export interface FsSandbox {
 	/** Max entries returned by a single fs_ls. Default 200. */
 	maxLsEntries?: number;
 	/**
-	 * Path-join helper injected so the skill layer stays platform-aware
-	 * without importing `node:path` (this file is shared with a future
-	 * renderer-side consumer that has no Node built-ins). Defaults to a
-	 * simple posix-style join at the call sites where a default is okay.
+	 * Path primitives injected so the skill layer stays cross-platform
+	 * without importing `node:path`. On Windows callers supply helpers
+	 * backed by `path.win32`; posix callers pass the default-ish set.
+	 *
+	 *  - `resolve`: canonicalise a possibly-relative path to absolute.
+	 *  - `dirname`: parent of a path. Used for mkdir-parent-before-write.
+	 *  - `sep`:     platform path separator (e.g. "/" on posix, "\\" on win32).
+	 *               Both prefix-check and sandbox-root compare use it so
+	 *               a sandbox of "/" (posix root) or "C:\\" (win drive root)
+	 *               still matches `/x` / `C:\\x` children correctly.
 	 */
 	resolve: (p: string) => string;
+	dirname: (p: string) => string;
+	sep: string;
 }
 
 export type FsReason =
@@ -101,15 +135,11 @@ export type FsWriteResult =
 	| { ok: true; path: string; byteSize: number }
 	| { ok: false; reason: FsReason; detail?: string };
 
-export interface FsLsEntry {
-	name: string;
-	isFile: boolean;
-	isDirectory: boolean;
-	size: number;
-}
+/** @deprecated — use {@link FsDirEntry}. Kept as a type alias for callers. */
+export type FsLsEntry = FsDirEntry;
 
 export type FsLsResult =
-	| { ok: true; entries: FsLsEntry[]; truncated: boolean }
+	| { ok: true; entries: FsDirEntry[]; truncated: boolean }
 	| { ok: false; reason: FsReason; detail?: string };
 
 const DEFAULT_MAX_READ = 256 * 1024;
@@ -150,9 +180,17 @@ async function resolveInSandbox(
 	} catch {
 		// not yet created — use the lexical abs; caller handles non-existence.
 	}
-	const inside = sandbox.allowedDirs.some(
-		(dir) => real === dir || real.startsWith(`${dir}/`),
-	);
+	const inside = sandbox.allowedDirs.some((dir) => {
+		if (real === dir) return true;
+		// If the sandbox root already ends with the separator (e.g. "/"
+		// posix root, "C:\\" win32 drive root), don't double-append —
+		// that would check `startsWith("//")` / `"C:\\\\"` and miss all
+		// children. Otherwise join dir + sep to enforce "child of dir",
+		// not just "lexical prefix of dir" (blocks sandbox="/work"
+		// allowing "/workshop").
+		const prefix = dir.endsWith(sandbox.sep) ? dir : `${dir}${sandbox.sep}`;
+		return real.startsWith(prefix);
+	});
 	if (!inside) {
 		return { ok: false, reason: "not_in_sandbox", detail: real };
 	}
@@ -185,11 +223,15 @@ export function createFsSkills(sandbox: FsSandbox): Skill[] {
 							detail: `${stat.size} > ${maxRead}`,
 						} satisfies FsReadResult;
 					}
-					const buf = await sandbox.driver.readFile(r.abs);
+					const bytes = await sandbox.driver.readFile(r.abs);
+					// TextDecoder, not Buffer, so this file has no Node-only
+					// dependency — matches the renderer-share promise in the
+					// file header.
+					const content = new TextDecoder("utf-8").decode(bytes);
 					return {
 						ok: true,
-						content: buf.toString("utf8"),
-						byteSize: buf.byteLength,
+						content,
+						byteSize: bytes.byteLength,
 					} satisfies FsReadResult;
 				} catch (err) {
 					return ioError(err);
@@ -202,43 +244,45 @@ export function createFsSkills(sandbox: FsSandbox): Skill[] {
 			inputSchema: FsWriteInput,
 			execute: async (raw) => {
 				const input = FsWriteInput.parse(raw);
-				const byteSize = Buffer.byteLength(input.content, "utf8");
-				if (byteSize > maxWrite) {
+				const bytes = new TextEncoder().encode(input.content);
+				if (bytes.byteLength > maxWrite) {
 					return {
 						ok: false,
 						reason: "too_large",
-						detail: `${byteSize} > ${maxWrite}`,
+						detail: `${bytes.byteLength} > ${maxWrite}`,
 					} satisfies FsWriteResult;
 				}
 				const r = await resolveInSandbox(input.path, sandbox);
 				if (!r.ok) return r satisfies FsWriteResult;
-				if (input.createOnly) {
-					// Use stat (not realpath, already done above) — if it
-					// resolves the target exists, which is a createOnly no-go.
-					try {
-						await sandbox.driver.stat(r.abs);
+				try {
+					// Ensure parent directory exists. Use injected dirname
+					// so Windows ('\\') and posix ('/') both work without
+					// string slicing on a hard-coded separator.
+					const dir = sandbox.dirname(r.abs);
+					if (dir && dir !== r.abs) {
+						await sandbox.driver.mkdir(dir, { recursive: true });
+					}
+					// `createOnly` → `wx` flag: atomic "fail if exists" at the
+					// OS level, no stat-then-write TOCTOU window.
+					await sandbox.driver.writeFile(r.abs, bytes, {
+						flag: input.createOnly ? "wx" : "w",
+					});
+					return {
+						ok: true,
+						path: r.abs,
+						byteSize: bytes.byteLength,
+					} satisfies FsWriteResult;
+				} catch (err) {
+					// Map EEXIST (raised by the wx flag) back into the
+					// existing io_error + 'exists' detail so callers don't
+					// have to special-case the errno code.
+					if ((err as { code?: string } | null)?.code === "EEXIST") {
 						return {
 							ok: false,
 							reason: "io_error",
 							detail: "exists and createOnly=true",
 						} satisfies FsWriteResult;
-					} catch {
-						// stat threw → doesn't exist → proceed.
 					}
-				}
-				try {
-					// Ensure parent directory exists. Caller's resolve() has
-					// already produced an absolute path; extracting the parent
-					// without node:path keeps the skill reusable in a plain
-					// browser test harness.
-					const sep = r.abs.lastIndexOf("/");
-					if (sep > 0) {
-						const dir = r.abs.slice(0, sep);
-						await sandbox.driver.mkdir(dir, { recursive: true });
-					}
-					await sandbox.driver.writeFile(r.abs, input.content);
-					return { ok: true, path: r.abs, byteSize } satisfies FsWriteResult;
-				} catch (err) {
 					return ioError(err);
 				}
 			},
@@ -256,29 +300,15 @@ export function createFsSkills(sandbox: FsSandbox): Skill[] {
 					if (!stat.isDirectory) {
 						return { ok: false, reason: "not_directory" } satisfies FsLsResult;
 					}
-					const names = await sandbox.driver.readdir(r.abs);
-					const cut = names.slice(0, maxLs);
-					const entries: FsLsEntry[] = [];
-					for (const name of cut) {
-						const child = `${r.abs}/${name}`;
-						try {
-							const cs = await sandbox.driver.stat(child);
-							entries.push({
-								name,
-								isFile: cs.isFile,
-								isDirectory: cs.isDirectory,
-								size: cs.size,
-							});
-						} catch {
-							// Entry vanished between readdir and stat — skip it
-							// silently. Surfacing the race as an error would
-							// confuse the LLM for no gain.
-						}
-					}
+					// One readdir call returns name + type + size for every
+					// entry — previous implementation did 1 + N stat calls
+					// (201 FS hits for a 200-entry directory).
+					const entries = await sandbox.driver.readdirDetailed(r.abs);
+					const cut = entries.slice(0, maxLs);
 					return {
 						ok: true,
-						entries,
-						truncated: names.length > maxLs,
+						entries: cut,
+						truncated: entries.length > maxLs,
 					} satisfies FsLsResult;
 				} catch (err) {
 					return ioError(err);
