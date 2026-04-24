@@ -270,25 +270,18 @@ function createOrchestrator(deps: OrchestratorDeps): AgentOrchestrator & {
 				/* headless */
 			};
 			const taskId = await runOneTask(deps, prompt, discard, null);
+			const onAbort = () => {
+				try {
+					deps.taskStore.abort(taskId);
+				} catch {
+					/* already terminal */
+				}
+			};
 			if (opts?.signal) {
 				if (opts.signal.aborted) {
-					try {
-						deps.taskStore.abort(taskId);
-					} catch {
-						/* already terminal */
-					}
+					onAbort();
 				} else {
-					opts.signal.addEventListener(
-						"abort",
-						() => {
-							try {
-								deps.taskStore.abort(taskId);
-							} catch {
-								/* already terminal */
-							}
-						},
-						{ once: true },
-					);
+					opts.signal.addEventListener("abort", onAbort, { once: true });
 				}
 			}
 			// Subscribe BEFORE checking current status. Otherwise a terminal
@@ -301,6 +294,12 @@ function createOrchestrator(deps: OrchestratorDeps): AgentOrchestrator & {
 					if (settled) return;
 					settled = true;
 					unsub();
+					// Detach abort listener on normal completion too — the
+					// { once: true } option only fires on abort, not on
+					// Promise resolution, so without this the closure (and
+					// taskStore reference) would pin until the caller's
+					// AbortController itself is collected.
+					opts?.signal?.removeEventListener("abort", onAbort);
 					resolve({
 						taskId,
 						endReason: status as
