@@ -14,12 +14,22 @@
  * The factory is deliberately small — it's a dep-assembly function, not a
  * business logic home. Tests unit-test each collaborator separately.
  */
+import {
+	mkdir,
+	readdir,
+	readFile,
+	realpath,
+	stat,
+	writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	type BrowserToolsCtx,
 	createBrowserToolsSkills,
+	createFsSkills,
 	createTabsSkills,
+	type FsDriver,
 	type Skill,
 	type TabController,
 	type TabInfo,
@@ -158,12 +168,25 @@ export async function createAgentHostForTab(
 	};
 	const tabController = createTabControllerForAgent(tabManager, activeAgentTab);
 	const externalSkills = deps.externalMcp?.skills() ?? [];
+	// Filesystem skills (P2 §2.7). Always built so the LLM sees they exist
+	// even when `fsSandboxDirs` is empty — callers get a clean
+	// `not_in_sandbox` rejection rather than "tool not found", which is
+	// easier for the LLM to recover from (it can ask the user to grant
+	// a folder).
+	const fsSkills = createFsSkills({
+		allowedDirs: policy.fsSandboxDirs.map((d) => path.resolve(d)),
+		driver: nodeFsDriver,
+		resolve: (p) => path.resolve(p),
+		dirname: (p) => path.dirname(p),
+		sep: path.sep,
+	});
 	const allSkills = [
 		...createBrowserToolsSkills(ctx),
 		...createTabsSkills({
 			controller: tabController,
 			policy: navigationPolicy,
 		}),
+		...fsSkills,
 		// External MCP tools go LAST so an externally-configured tool
 		// can never shadow a built-in by sharing its name — filterSkills
 		// later keeps only names in policy.allowedTools anyway.
@@ -443,6 +466,73 @@ export function createTabControllerForAgent(
  * in AdminPolicy.allowedTools. The separator is `__`; first-party tools
  * that need an underscore use a single one (e.g. `tabs_open`).
  */
+/**
+ * Node-backed FsDriver used in production. Wraps the node:fs/promises
+ * subset the skill layer calls — small enough that we don't need a
+ * separate driver module.
+ */
+const nodeFsDriver: FsDriver = {
+	async readFile(p) {
+		const buf = await readFile(p);
+		// Node Buffer extends Uint8Array, but we return a plain view so the
+		// skill layer's Uint8Array-only contract holds if the driver is
+		// ever reused in a non-Node environment.
+		return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+	},
+	async writeFile(p, data, opts) {
+		// Pass the `flag` through so fs_write's `createOnly` ⇒ `wx`
+		// piggybacks on the OS-level atomic "fail if exists" behaviour.
+		await writeFile(p, data, { flag: opts?.flag ?? "w" });
+	},
+	async readdirDetailed(p) {
+		const dirents = await readdir(p, { withFileTypes: true });
+		// Parallelise stat-for-size (Dirent carries no size, so one stat
+		// per entry stays necessary). Sequential loop was O(N) wall-clock
+		// for large directories; Promise.all keeps throughput FS-bound.
+		// Use path.join (not string interp) so Windows backslash paths
+		// work.
+		//
+		// Symlink policy: we intentionally use `stat` (which follows the
+		// link) rather than the `Dirent.isFile/isDirectory` booleans
+		// (which describe the link itself, not its target). Rationale —
+		// the Agent's next step after ls is usually fs_read or fs_write,
+		// and those operations follow the link too; reporting the
+		// target's type keeps the three tools consistent. Broken links
+		// (stat throws) are dropped via the catch, same as a vanished
+		// entry, so the Agent just doesn't see them.
+		const results = await Promise.all(
+			dirents.map(async (d) => {
+				try {
+					const s = await stat(path.join(p, d.name));
+					return {
+						name: d.name,
+						isFile: s.isFile(),
+						isDirectory: s.isDirectory(),
+						size: s.size,
+					};
+				} catch {
+					return undefined;
+				}
+			}),
+		);
+		return results.filter((r): r is NonNullable<typeof r> => r !== undefined);
+	},
+	async stat(p) {
+		const s = await stat(p);
+		return {
+			isFile: s.isFile(),
+			isDirectory: s.isDirectory(),
+			size: s.size,
+		};
+	},
+	async mkdir(p, opts) {
+		await mkdir(p, opts);
+	},
+	async realpath(p) {
+		return realpath(p);
+	},
+};
+
 export function isExternalMcpSkillName(name: string): boolean {
 	return name.includes("__");
 }
