@@ -135,7 +135,12 @@ export type FsWriteResult =
 	| { ok: true; path: string; byteSize: number }
 	| { ok: false; reason: FsReason; detail?: string };
 
-/** @deprecated — use {@link FsDirEntry}. Kept as a type alias for callers. */
+/**
+ * Alias of {@link FsDirEntry}. Exists so callers that destructure from
+ * `FsLsResult.entries` can import a name that reads ergonomically at the
+ * call site (`FsLsEntry`) without us having to maintain two identical
+ * shapes. Not deprecated — both names are stable.
+ */
 export type FsLsEntry = FsDirEntry;
 
 export type FsLsResult =

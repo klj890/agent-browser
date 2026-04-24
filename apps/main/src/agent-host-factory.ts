@@ -490,21 +490,22 @@ const nodeFsDriver: FsDriver = {
 		// per entry stays necessary). Sequential loop was O(N) wall-clock
 		// for large directories; Promise.all keeps throughput FS-bound.
 		// Use path.join (not string interp) so Windows backslash paths
-		// work. `stat()` follows symlinks — which matches what isFile()/
-		// isDirectory() via a second stat would report — so link target
-		// type + size land in the entry; broken symlinks are dropped by
-		// the catch below the same as a vanished file.
+		// work.
+		//
+		// Symlink policy: we intentionally use `stat` (which follows the
+		// link) rather than the `Dirent.isFile/isDirectory` booleans
+		// (which describe the link itself, not its target). Rationale —
+		// the Agent's next step after ls is usually fs_read or fs_write,
+		// and those operations follow the link too; reporting the
+		// target's type keeps the three tools consistent. Broken links
+		// (stat throws) are dropped via the catch, same as a vanished
+		// entry, so the Agent just doesn't see them.
 		const results = await Promise.all(
 			dirents.map(async (d) => {
 				try {
 					const s = await stat(path.join(p, d.name));
 					return {
 						name: d.name,
-						// Prefer Dirent over the follow-symlink stat for the
-						// is{File,Directory} boolean so a symlink is reported
-						// as a symlink's link target only on size — not to
-						// advertise "this is a file" when it's a link to a
-						// directory.
 						isFile: s.isFile(),
 						isDirectory: s.isDirectory(),
 						size: s.size,
