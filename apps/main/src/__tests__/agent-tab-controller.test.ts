@@ -19,19 +19,23 @@ function fakeTabManager(rows: FakeTabRow[]): TabManager {
 	const store = new Map<string, FakeTabRow>();
 	for (const r of rows) store.set(r.id, r);
 	let nextId = 100;
+	const toSummary = (t: FakeTabRow) => ({
+		id: t.id,
+		url: t.url,
+		title: t.title,
+		state: t.state,
+		active: false,
+		pinned: false,
+		openedByAgent: t.openedByAgent,
+		isIncognito: false,
+		partition: "persist:default",
+	});
 	return {
-		list: () =>
-			Array.from(store.values()).map((t) => ({
-				id: t.id,
-				url: t.url,
-				title: t.title,
-				state: t.state,
-				active: false,
-				pinned: false,
-				openedByAgent: t.openedByAgent,
-				isIncognito: false,
-				partition: "persist:default",
-			})),
+		list: () => Array.from(store.values()).map(toSummary),
+		getSummary: (id: string) => {
+			const t = store.get(id);
+			return t ? toSummary(t) : undefined;
+		},
 		create: (url: string) => {
 			const id = `t${nextId++}`;
 			store.set(id, {
@@ -104,6 +108,43 @@ describe("createTabControllerForAgent", () => {
 		const ctrl = createTabControllerForAgent(tm, ref);
 		ctrl.close("a1");
 		expect(ref.id).toBe("a1");
+	});
+
+	it("waitLoad resolves 'aborted' when the signal aborts mid-poll and clears its timer", async () => {
+		const tm = fakeTabManager([
+			{
+				id: "a1",
+				url: "a1",
+				title: "a1",
+				openedByAgent: true,
+				state: "loading",
+			},
+		]);
+		const ref = { id: "a1" };
+		const ctrl = createTabControllerForAgent(tm, ref);
+		const ac = new AbortController();
+		const promise = ctrl.waitLoad("a1", 5_000, ac.signal);
+		setTimeout(() => ac.abort(), 50);
+		await expect(promise).resolves.toBe("aborted");
+	});
+
+	it("waitLoad returns 'aborted' immediately if signal is already aborted", async () => {
+		const tm = fakeTabManager([
+			{
+				id: "a1",
+				url: "a1",
+				title: "a1",
+				openedByAgent: true,
+				state: "loading",
+			},
+		]);
+		const ref = { id: "a1" };
+		const ctrl = createTabControllerForAgent(tm, ref);
+		const ac = new AbortController();
+		ac.abort();
+		await expect(ctrl.waitLoad("a1", 5_000, ac.signal)).resolves.toBe(
+			"aborted",
+		);
 	});
 
 	it("waitLoad resolves 'not_found' when the tab disappears mid-poll", async () => {

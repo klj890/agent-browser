@@ -104,8 +104,10 @@ export async function createAgentHostForTab(
 	// tab so the Agent can background-research in a tab it opened without
 	// disrupting the user. Multi-tab tools (tabs_switch) mutate this ref.
 	const activeAgentTab = { id: tabId };
-	const findSummary = (id: string) =>
-		tabManager.list().find((t) => t.id === id);
+	// Use the O(1) TabManager.getSummary lookup here. list().find() was a
+	// scan per getter access, noticeable when snapshot/act read pageUrl
+	// multiple times inside a single execute().
+	const findSummary = (id: string) => tabManager.getSummary(id);
 	// Build a ctx whose cdp/registry/pageUrl/pageTitle resolve *per call* to
 	// whichever tab the Agent currently has focused. Using getters keeps the
 	// five original tools' execute() bodies unchanged.
@@ -362,19 +364,34 @@ export function createTabControllerForAgent(
 		getAgentActiveId() {
 			return activeAgentTab.id;
 		},
-		waitLoad(id, timeoutMs) {
+		waitLoad(id, timeoutMs, signal) {
 			return new Promise((resolve) => {
 				const start = Date.now();
+				let handle: ReturnType<typeof setTimeout> | undefined;
+				let settled = false;
+				const settle = (r: Parameters<typeof resolve>[0]) => {
+					if (settled) return;
+					settled = true;
+					if (handle) clearTimeout(handle);
+					signal?.removeEventListener("abort", onAbort);
+					resolve(r);
+				};
+				const onAbort = () => settle("aborted");
+				if (signal) {
+					if (signal.aborted) return settle("aborted");
+					signal.addEventListener("abort", onAbort, { once: true });
+				}
 				const poll = () => {
-					const tab = tabManager.list().find((t) => t.id === id);
+					if (settled) return;
+					const tab = tabManager.getSummary(id);
 					// Tab vanished mid-poll (closed by user / crashed-and-cleaned):
 					// surface a distinct "not_found" so the Agent can decide
 					// whether to retry or give up, rather than conflate with timeout.
-					if (!tab) return resolve("not_found");
-					if (tab.state === "idle") return resolve("idle");
-					if (tab.state === "crashed") return resolve("crashed");
-					if (Date.now() - start >= timeoutMs) return resolve("timeout");
-					setTimeout(poll, 100);
+					if (!tab) return settle("not_found");
+					if (tab.state === "idle") return settle("idle");
+					if (tab.state === "crashed") return settle("crashed");
+					if (Date.now() - start >= timeoutMs) return settle("timeout");
+					handle = setTimeout(poll, 100);
 				};
 				poll();
 			});

@@ -330,7 +330,20 @@ export class TabManager {
 	}
 
 	list(): TabSummary[] {
-		return Array.from(this.tabs.values()).map((t) => ({
+		return Array.from(this.tabs.values()).map((t) => this.toSummary(t));
+	}
+
+	/**
+	 * O(1) lookup by id — preferred over `list().find(...)` on hot paths
+	 * (e.g. BrowserToolsCtx getters invoked from snapshot/act).
+	 */
+	getSummary(id: string): TabSummary | undefined {
+		const t = this.tabs.get(id);
+		return t ? this.toSummary(t) : undefined;
+	}
+
+	private toSummary(t: Tab): TabSummary {
+		return {
 			id: t.id,
 			url: t.url,
 			title: t.title,
@@ -342,7 +355,7 @@ export class TabManager {
 			isIncognito: t.isIncognito,
 			profileId: t.profileId,
 			partition: t.partition,
-		}));
+		};
 	}
 
 	getActiveId(): string | undefined {

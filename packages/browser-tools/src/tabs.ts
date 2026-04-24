@@ -55,7 +55,8 @@ export interface TabController {
 	waitLoad(
 		id: string,
 		timeoutMs: number,
-	): Promise<"idle" | "timeout" | "crashed" | "not_found">;
+		signal?: AbortSignal,
+	): Promise<"idle" | "timeout" | "crashed" | "not_found" | "aborted">;
 }
 
 export const TabsListInput = z.object({}).passthrough();
@@ -111,7 +112,7 @@ export type TabsSwitchResult =
 
 export type TabsWaitLoadResult =
 	| { ok: true; state: "idle" }
-	| { ok: false; reason: "not_found" | "timeout" | "crashed" };
+	| { ok: false; reason: "not_found" | "timeout" | "crashed" | "aborted" };
 
 export interface TabsCtx {
 	controller: TabController;
