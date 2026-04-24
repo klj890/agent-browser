@@ -1,6 +1,6 @@
 # 来自 BrowserOS 的借鉴
 
-> 基于 `/Users/wangtao/claude_project/BrowserOS` 源码 + 官方 docs 的扫描（2026-04-24）。
+> 基于 BrowserOS（[github.com/browseros-ai/BrowserOS](https://github.com/browseros-ai/BrowserOS)，AGPL v3）源码 + 官方 docs 的扫描（2026-04-24）。
 > 目的：在 agent-browser（Electron + CogniRefract）路线图里吸收 BrowserOS 已验证的设计，避免重复踩坑。
 
 ---

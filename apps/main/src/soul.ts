@@ -16,7 +16,8 @@
  * to a separate PR because they need AuditLog integration + confirmation
  * gate — self-modifying system prompt is high-trust territory.
  */
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 
 /**
  * Cap on SOUL.md size. Anything larger blows up LLM context cost and is
@@ -90,6 +91,7 @@ export interface FileSoulProviderOpts {
 	fsImpl?: {
 		readFile: typeof readFile;
 		writeFile: typeof writeFile;
+		mkdir: typeof mkdir;
 	};
 }
 
@@ -107,13 +109,14 @@ export class FileSoulProvider implements SoulProvider {
 	private readonly fs: {
 		readFile: typeof readFile;
 		writeFile: typeof writeFile;
+		mkdir: typeof mkdir;
 	};
 
 	constructor(opts: FileSoulProviderOpts) {
 		this.path = opts.path;
 		this.defaultBody = opts.defaultBody;
 		this.seedOnMissing = opts.seedOnMissing ?? true;
-		this.fs = opts.fsImpl ?? { readFile, writeFile };
+		this.fs = opts.fsImpl ?? { readFile, writeFile, mkdir };
 	}
 
 	async load(): Promise<string> {
@@ -129,6 +132,9 @@ export class FileSoulProvider implements SoulProvider {
 			if (!isEnoent(err)) throw err;
 			if (this.seedOnMissing) {
 				try {
+					// Ensure parent exists — on first launch agent-browser's
+					// userData/agent-browser/ may not be created yet.
+					await this.fs.mkdir(path.dirname(this.path), { recursive: true });
 					await this.fs.writeFile(this.path, this.defaultBody, "utf8");
 				} catch (seedErr) {
 					// Non-fatal: caller still gets the default body below.
@@ -163,10 +169,12 @@ export function appendSoulToPrompt(systemPrompt: string, soul: string): string {
 		.trim()
 		.replace(/<!-- soul:end -->/g, "<!-- soul:end-escaped -->");
 	if (body === "") return systemPrompt;
-	// Explicit fence is belt-and-braces: the LLM can already see the section
-	// header, but a machine-readable boundary helps future tooling (audit
-	// diffing, structured redaction) locate SOUL without parsing markdown.
-	return `${systemPrompt}\n\n<!-- soul:start -->\n${body}\n${SOUL_END_FENCE}\n`;
+	// trimEnd() on the prompt so appendPersonaBody's trailing "\n" doesn't
+	// compound with our "\n\n" into a run of three blank lines. Explicit
+	// fence is belt-and-braces: the LLM can already see the section header,
+	// but a machine-readable boundary helps future tooling (audit diffing,
+	// structured redaction) locate SOUL without parsing markdown.
+	return `${systemPrompt.trimEnd()}\n\n<!-- soul:start -->\n${body}\n${SOUL_END_FENCE}\n`;
 }
 
 function isEnoent(err: unknown): boolean {

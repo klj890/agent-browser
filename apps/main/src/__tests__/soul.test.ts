@@ -1,5 +1,5 @@
 import { mkdtempSync, rmSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -30,6 +30,15 @@ describe("appendSoulToPrompt", () => {
 		expect(matches).toHaveLength(1);
 		expect(out).toContain("<!-- soul:end-escaped -->");
 	});
+
+	it("trims trailing whitespace on the prompt to avoid triple-newline between persona and soul", () => {
+		// Simulate the appendPersonaBody output ending with "\n" (as it does).
+		const promptWithTrailingNewline = "base\npersona stuff\n";
+		const out = appendSoulToPrompt(promptWithTrailingNewline, "pref");
+		// Exactly one blank line between persona end and fence start.
+		expect(out).toContain("persona stuff\n\n<!-- soul:start -->");
+		expect(out).not.toContain("\n\n\n");
+	});
 });
 
 describe("FileSoulProvider", () => {
@@ -43,6 +52,18 @@ describe("FileSoulProvider", () => {
 
 	afterEach(() => {
 		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("mkdirs parent directory before seeding when it does not yet exist", async () => {
+		const deepPath = path.join(tmp, "a", "b", "c", "soul.md");
+		const p = new FileSoulProvider({
+			path: deepPath,
+			defaultBody: "seeded body",
+		});
+		const body = await p.load();
+		expect(body).toBe("seeded body");
+		const onDisk = await readFile(deepPath, "utf8");
+		expect(onDisk).toBe("seeded body");
 	});
 
 	it("returns the default body and seeds the file on first read", async () => {
@@ -87,6 +108,7 @@ describe("FileSoulProvider", () => {
 				throw Object.assign(new Error("perm denied"), { code: "EACCES" });
 			}),
 			writeFile: vi.fn(),
+			mkdir: vi.fn(),
 		};
 		const p = new FileSoulProvider({
 			path: soulPath,
@@ -94,6 +116,7 @@ describe("FileSoulProvider", () => {
 			fsImpl: fsImpl as unknown as {
 				readFile: typeof readFile;
 				writeFile: typeof writeFile;
+				mkdir: typeof mkdir;
 			},
 		});
 		await expect(p.load()).rejects.toThrow(/perm denied/);
@@ -116,6 +139,7 @@ describe("FileSoulProvider", () => {
 			writeFile: vi.fn(async () => {
 				throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
 			}),
+			mkdir: vi.fn(async () => undefined),
 		};
 		const p = new FileSoulProvider({
 			path: soulPath,
@@ -123,6 +147,7 @@ describe("FileSoulProvider", () => {
 			fsImpl: fsImpl as unknown as {
 				readFile: typeof readFile;
 				writeFile: typeof writeFile;
+				mkdir: typeof mkdir;
 			},
 		});
 		// Must not throw — the agent session shouldn't fail to boot just

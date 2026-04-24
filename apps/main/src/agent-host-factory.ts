@@ -175,20 +175,18 @@ export async function createAgentHostForTab(
 	const afterPersona = appendPersonaBody(systemPrompt, persona.contentMd);
 	// SOUL is appended LAST so its boundaries/preferences override persona
 	// style (persona = "what role now", SOUL = "how I always want you to act").
-	// A SOUL load failure is non-fatal — the Agent still boots with persona
-	// + base prompt; a broken SOUL shouldn't block the user's session.
+	//
+	// Fail-closed on read errors (security-high): FileSoulProvider already
+	// returns the default body for ENOENT, so any error bubbling up here
+	// means a configured SOUL file exists but cannot be read (EACCES,
+	// corrupted, oversize…). Silently dropping it would run the Agent
+	// without the user's declared hard boundaries — exactly the scenario
+	// the feature exists to prevent. Let it throw; the session fails to
+	// start, the user sees the cause and fixes the file.
 	let finalSystemPrompt = afterPersona;
 	if (deps.soul) {
-		try {
-			const soulBody = await deps.soul.load();
-			finalSystemPrompt = appendSoulToPrompt(afterPersona, soulBody);
-		} catch (err) {
-			console.warn(
-				`[agent-host-factory] soul load failed, continuing without it: ${
-					err instanceof Error ? err.message : String(err)
-				}`,
-			);
-		}
+		const soulBody = await deps.soul.load();
+		finalSystemPrompt = appendSoulToPrompt(afterPersona, soulBody);
 	}
 
 	// If tool-result-storage is wired, add the meta-skill so the LLM can
