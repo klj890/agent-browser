@@ -170,15 +170,24 @@ async function resolveInSandbox(
 			detail: err instanceof Error ? err.message : String(err),
 		};
 	}
-	// realpath resolves symlinks so we can't be fooled by a link inside
-	// the sandbox that points to /etc. realpath on a non-existent path
-	// throws — in that case fall back to the pre-realpath abs (for writes
-	// to new files) and still enforce the prefix check below.
-	let real = abs;
+	// Security-critical: realpath the deepest existing ancestor.
+	//
+	// Naive realpath(abs) throws ENOENT for paths that don't exist yet
+	// (fs_write to a new file), so a previous version fell back to the
+	// lexical `abs`. That opens a sandbox escape: if any parent is a
+	// symlink pointing OUT of the sandbox (e.g. `/sandbox/link_to_etc`
+	// → `/etc`) and the leaf is new, `abs` stays lexically inside the
+	// sandbox — but the subsequent mkdir/write follows the symlink and
+	// lands in /etc. We walk up until an ancestor exists, realpath
+	// that, then stitch the untouched tail back on. Any symlink in the
+	// existing prefix is resolved; any symlink in the (non-existent)
+	// tail can't exist yet and will only become real via mkdir beneath
+	// the already-canonicalised base.
+	let real: string;
 	try {
 		real = await sandbox.driver.realpath(abs);
 	} catch {
-		// not yet created — use the lexical abs; caller handles non-existence.
+		real = await resolveExistingAncestor(abs, sandbox);
 	}
 	const inside = sandbox.allowedDirs.some((dir) => {
 		if (real === dir) return true;
@@ -195,6 +204,38 @@ async function resolveInSandbox(
 		return { ok: false, reason: "not_in_sandbox", detail: real };
 	}
 	return { ok: true, abs: real };
+}
+
+/**
+ * Walk up `abs` one `dirname` at a time until `realpath` succeeds, then
+ * rejoin the non-existent tail onto the canonicalised ancestor. The rejoined
+ * tail is guaranteed not to contain symlinks yet (they would require parent
+ * directories to exist). If even the sandbox root doesn't realpath (really
+ * unusual — driver misconfig), we still return the lexical abs so the caller
+ * fails closed at the prefix check instead of hanging.
+ */
+async function resolveExistingAncestor(
+	abs: string,
+	sandbox: FsSandbox,
+): Promise<string> {
+	const tailParts: string[] = [];
+	let cursor = abs;
+	// Bound iterations so a pathological `dirname` that never shrinks doesn't loop.
+	for (let i = 0; i < 64; i++) {
+		try {
+			const realAncestor = await sandbox.driver.realpath(cursor);
+			return tailParts.length === 0
+				? realAncestor
+				: `${realAncestor}${sandbox.sep}${tailParts.reverse().join(sandbox.sep)}`;
+		} catch {
+			const parent = sandbox.dirname(cursor);
+			if (parent === cursor) break; // reached filesystem root
+			const leaf = cursor.slice(parent.length + sandbox.sep.length);
+			if (leaf) tailParts.push(leaf);
+			cursor = parent;
+		}
+	}
+	return abs;
 }
 
 export function createFsSkills(sandbox: FsSandbox): Skill[] {

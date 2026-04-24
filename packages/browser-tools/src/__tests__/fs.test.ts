@@ -91,8 +91,35 @@ function memDriver(
 			files.set(p, "<dir>");
 		},
 		async realpath(p) {
-			const target = symlinks.get(p);
-			return target ?? p;
+			// Posix semantics: resolve symlinks left-to-right component by
+			// component; leaf must exist or ENOENT. Bounded to avoid loops.
+			let cursor = p;
+			for (let i = 0; i < 32; i++) {
+				const direct = symlinks.get(cursor);
+				if (direct !== undefined) {
+					cursor = direct;
+					continue;
+				}
+				// Is any parent a symlink? Take the longest matching prefix.
+				let matched: { link: string; target: string } | undefined;
+				for (const [link, target] of symlinks) {
+					if (cursor.startsWith(`${link}/`)) {
+						if (!matched || link.length > matched.link.length) {
+							matched = { link, target };
+						}
+					}
+				}
+				if (matched) {
+					cursor = `${matched.target}${cursor.slice(matched.link.length)}`;
+					continue;
+				}
+				// No more symlinks to resolve. Leaf must exist.
+				if (files.has(cursor) || isDirKey(cursor)) return cursor;
+				throw Object.assign(new Error(`ENOENT: ${cursor}`), {
+					code: "ENOENT",
+				});
+			}
+			throw Object.assign(new Error(`ELOOP: ${p}`), { code: "ELOOP" });
 		},
 	};
 }
@@ -154,6 +181,28 @@ describe("createFsSkills — sandbox", () => {
 		})) as FsReadResult;
 		expect(res.ok).toBe(false);
 		if (!res.ok) expect(res.reason).toBe("not_in_sandbox");
+	});
+
+	it("parent-symlink escape on NEW file → rejected (lexical fallback is not enough)", async () => {
+		// /sandbox exists; /sandbox/link_to_etc is a symlink to /etc.
+		// The Agent asks to write /sandbox/link_to_etc/new_file. realpath
+		// throws ENOENT for the non-existent leaf; a naive implementation
+		// falls back to the lexical abs which PASSES the prefix check
+		// (starts with "/sandbox") — but mkdir/write would follow the
+		// symlink and drop the file inside /etc.
+		const driver = memDriver(
+			{ "/sandbox": "<dir>", "/etc": "<dir>" },
+			{ symlinks: { "/sandbox/link_to_etc": "/etc" } },
+		);
+		const skills = createFsSkills(mkSandbox(driver, ["/sandbox"]));
+		const res = (await getSkill(skills, "fs_write").execute({
+			path: "/sandbox/link_to_etc/new_file",
+			content: "gotcha",
+		})) as FsWriteResult;
+		expect(res.ok).toBe(false);
+		if (!res.ok) expect(res.reason).toBe("not_in_sandbox");
+		// And nothing was written anywhere
+		expect(driver.files.has("/etc/new_file")).toBe(false);
 	});
 
 	it("sandbox root = '/' still gates children correctly (no double-sep bug)", async () => {
