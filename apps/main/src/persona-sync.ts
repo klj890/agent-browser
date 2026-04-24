@@ -54,18 +54,19 @@ export class PersonaCache {
 		// key source_id ASC gives deterministic tie-breaking when two
 		// sources carry identical timestamps (otherwise SQLite order is
 		// implementation-defined).
-		// WHERE ps.enabled IS NULL OR ps.enabled = 1: skip rows belonging
-		// to a disabled source so the user's "toggle off" takes effect
-		// without waiting for an explicit unsubscribe. IS NULL covers the
-		// case where source_id has no matching persona_sources row (legacy
-		// 'default' personas migrated from pre-P2-19 deployments).
+		// WHERE ps.enabled = 1: skip rows belonging to a disabled source
+		// *and* orphan rows (source_id has no matching persona_sources
+		// row). Orphans are pre-P2-19 'default' rows left over after the
+		// 008 migration when PERSONA_SERVER_URL was never configured —
+		// safer to hide them than to surface something the user cannot
+		// manage from the sources UI.
 		const rows = this.appDb.db
 			.prepare(
 				`SELECT pc.slug, pc.name, pc.description, pc.domains_json, pc.allowed_tools_json,
 				        pc.content_md, pc.source_id, ps.name AS source_name, ps.kind AS source_kind
 				 FROM personas_cache pc
-				 LEFT JOIN persona_sources ps ON ps.id = pc.source_id
-				 WHERE ps.enabled IS NULL OR ps.enabled = 1
+				 INNER JOIN persona_sources ps ON ps.id = pc.source_id
+				 WHERE ps.enabled = 1
 				 ORDER BY pc.last_updated ASC, pc.source_id ASC`,
 			)
 			.all() as CacheRow[];

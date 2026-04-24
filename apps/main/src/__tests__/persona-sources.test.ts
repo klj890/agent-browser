@@ -401,6 +401,54 @@ describe("syncPersonasFromAllSources", () => {
 		db.close();
 	});
 
+	it("local persona survives shadow-then-unsubscribe: rehydrated after clearRemote", async () => {
+		const db = mkDb();
+		const sources = new PersonaSourceStore(db);
+		sources.upsert({ id: "team", name: "T", url: "https://t", kind: "team" });
+		const pm = new PersonaManager();
+		// Local file-based persona (as loadFromDir would do).
+		pm.register({
+			slug: "helper",
+			name: "Helper (local)",
+			description: "local copy",
+			contentMd: "local body",
+			frontmatter: { name: "Helper (local)", description: "", domains: [] },
+			source: { id: "local", kind: "local", name: "Local" },
+		});
+		const fetchImpl = vi.fn(async () => {
+			return {
+				ok: true,
+				json: async () => [
+					{
+						...remote("helper"),
+						name: "Helper (team)",
+						description: "team copy",
+					},
+				],
+			} as Response;
+		}) as unknown as typeof fetch;
+		await syncPersonasFromAllSources({
+			appDb: db,
+			personaManager: pm,
+			sources,
+			fetchImpl,
+		});
+		// Remote shadowed local during sync.
+		expect(pm.getBySlug("helper")?.description).toBe("team copy");
+		// Unsubscribe → local should rehydrate on next sync.
+		sources.remove("team");
+		await syncPersonasFromAllSources({
+			appDb: db,
+			personaManager: pm,
+			sources,
+			fetchImpl,
+		});
+		const after = pm.getBySlug("helper");
+		expect(after?.description).toBe("local copy");
+		expect(after?.source?.kind).toBe("local");
+		db.close();
+	});
+
 	it("disabled source is skipped", async () => {
 		const db = mkDb();
 		const sources = new PersonaSourceStore(db);

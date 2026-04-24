@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { PersonaManager } from "../persona-manager.js";
+import { PersonaSourceStore } from "../persona-sources.js";
 import {
 	PersonaCache,
 	type RemotePersona,
@@ -9,6 +10,15 @@ import { AppDatabase } from "../storage/sqlite.js";
 
 function mkDb() {
 	return new AppDatabase(":memory:");
+}
+
+function seedDefaultSource(db: AppDatabase) {
+	new PersonaSourceStore(db).upsert({
+		id: "default",
+		name: "Default",
+		url: "http://unused",
+		kind: "team",
+	});
 }
 
 function remote(slug: string, domains: string[]): RemotePersona {
@@ -25,6 +35,7 @@ function remote(slug: string, domains: string[]): RemotePersona {
 describe("PersonaCache", () => {
 	it("upsertMany + list round-trip", () => {
 		const db = mkDb();
+		seedDefaultSource(db);
 		const cache = new PersonaCache(db);
 		cache.upsertMany(
 			[remote("a", ["*.a.com"]), remote("b", ["b.com"])],
@@ -39,6 +50,7 @@ describe("PersonaCache", () => {
 
 	it("upsert overwrites existing slug", () => {
 		const db = mkDb();
+		seedDefaultSource(db);
 		const cache = new PersonaCache(db);
 		cache.upsertMany([remote("a", ["old.com"])], "default");
 		cache.upsertMany([remote("a", ["new.com"])], "default");
