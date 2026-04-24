@@ -40,6 +40,7 @@ P2 in progress:
 
 - **Stage 17**: MCP server — external Claude/Cursor can drive this browser
 - **Stage 18**: multi-tab Agent coordination (tabs_list/open/close/switch/wait_load skills)
+- **Stage 19**: team-shared personas + public marketplace (multi-source sync with per-source cursor and failure isolation)
 
 ## Layout
 

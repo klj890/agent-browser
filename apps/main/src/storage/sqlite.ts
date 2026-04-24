@@ -218,4 +218,20 @@ CREATE INDEX IF NOT EXISTS bookmark_tombstones_deleted
   ON bookmark_tombstones(deleted_at ASC, id ASC);
 `,
 	},
+	{
+		name: "008_persona_sources.sql",
+		sql: `
+CREATE TABLE IF NOT EXISTS persona_sources (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  url TEXT NOT NULL,
+  token TEXT,
+  kind TEXT NOT NULL CHECK (kind IN ('team', 'public')),
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL
+);
+ALTER TABLE personas_cache ADD COLUMN source_id TEXT NOT NULL DEFAULT 'default';
+CREATE INDEX IF NOT EXISTS personas_cache_source ON personas_cache(source_id);
+`,
+	},
 ];

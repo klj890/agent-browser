@@ -27,12 +27,25 @@ export interface PersonaFrontmatter {
 	allowedTools?: string[];
 }
 
+/**
+ * Provenance attached to a persona so the UI can badge it and the user can
+ * unsubscribe a whole source. Local file-system personas get `kind: 'local'`
+ * and no url/token. Undefined on legacy personas loaded before P2-19.
+ */
+export interface PersonaSourceRef {
+	id: string;
+	kind: "team" | "public" | "local";
+	name: string;
+}
+
 export interface Persona {
 	slug: string;
 	name: string;
 	description: string;
 	contentMd: string;
 	frontmatter: PersonaFrontmatter;
+	/** Where this persona came from. Added in P2-19. */
+	source?: PersonaSourceRef;
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +290,10 @@ export class PersonaManager {
 			const slug = name.slice(0, -3);
 			const source = await readFile(path.join(dir, name), "utf8");
 			const persona = parsePersona(slug, source);
+			// Stamp file-system personas with the `local` source so the UI can
+			// tell them apart from team/public and so unsubscribing a remote
+			// source never wipes the user's own files.
+			persona.source = { id: "local", kind: "local", name: "Local" };
 			this.register(persona);
 			loaded.push(persona);
 		}
