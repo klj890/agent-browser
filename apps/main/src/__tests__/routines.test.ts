@@ -520,4 +520,31 @@ describe("RoutinesEngine — stale timeout + run history (P2 §2.5)", () => {
 		await engine.runNow("r");
 		expect(engine.getRuns("r")[0]?.status).toBe("error");
 	});
+
+	it("orchestrator error message is surfaced into run history", async () => {
+		seedRoutine();
+		const orch: RoutineOrchestrator = {
+			async startTask() {
+				return "legacy";
+			},
+			async runToCompletion() {
+				return {
+					taskId: "t-fail",
+					endReason: "failed",
+					durationMs: 5,
+					error: "rate_limit_exceeded",
+				};
+			},
+		};
+		const engine = new RoutinesEngine({
+			dir: tmp,
+			orchestrator: orch,
+			cronImpl: makeCronImpl().impl,
+		});
+		await engine.load();
+		await engine.runNow("r");
+		const run = engine.getRuns("r")[0];
+		expect(run?.status).toBe("error");
+		expect(run?.error).toBe("rate_limit_exceeded");
+	});
 });

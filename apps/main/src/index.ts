@@ -266,10 +266,18 @@ function createOrchestrator(deps: OrchestratorDeps): AgentOrchestrator & {
 		 */
 		async runBackgroundTaskToCompletion(prompt, opts) {
 			const startedAt = Date.now();
-			const discard = (_c: StreamChunk) => {
-				/* headless */
+			// Capture the first error chunk so the routine's run history
+			// can record the actual failure message, not a generic 'failed'.
+			// Subsequent error chunks are ignored — we only surface the
+			// precipitating error, and tool errors that the agent recovers
+			// from would otherwise clobber the real one.
+			let errorMessage: string | undefined;
+			const capture = (c: StreamChunk) => {
+				if (errorMessage == null && c.type === "error") {
+					errorMessage = c.message;
+				}
 			};
-			const taskId = await runOneTask(deps, prompt, discard, null);
+			const taskId = await runOneTask(deps, prompt, capture, null);
 			const onAbort = () => {
 				try {
 					deps.taskStore.abort(taskId);
@@ -308,6 +316,7 @@ function createOrchestrator(deps: OrchestratorDeps): AgentOrchestrator & {
 							| "killed"
 							| "budget_exceeded",
 						durationMs: Date.now() - startedAt,
+						error: errorMessage,
 					});
 				};
 				const unsub = deps.taskStore.onChange((task) => {
