@@ -583,7 +583,7 @@ function createMemorySkills(memory: MemoryStore): Skill[] {
 		{
 			name: "memory_search",
 			description:
-				"Search the user's memory (CORE.md + daily notes) for lines matching given keywords. Returns up to 10 hits with source/section/line. Keywords are AND-matched case-insensitively.",
+				"Search the user's memory (CORE.md + daily notes) for lines matching given keywords. Returns hits with source/section/line; default 10, max 50 via the `limit` arg. Keywords are AND-matched case-insensitively.",
 			inputSchema: MemorySearchInput,
 			execute: async (input) => {
 				// input already ran through AgentHost's Zod gate, so we don't

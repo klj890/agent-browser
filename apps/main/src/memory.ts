@@ -112,8 +112,10 @@ export class MemoryStore {
 					`CORE.md exceeds ${this.maxCoreBytes} bytes (${s.size})`,
 				);
 			}
-			const raw = await readFile(this.corePath);
-			return new TextDecoder("utf-8").decode(raw);
+			// Node-only path → readFile with encoding is simpler than the
+			// TextDecoder dance (which made sense in the cross-runtime
+			// `packages/browser-tools` but not here).
+			return await readFile(this.corePath, "utf-8");
 		} catch (err) {
 			if (!isEnoent(err)) throw err;
 			await mkdir(this.dir, { recursive: true });
@@ -126,14 +128,17 @@ export class MemoryStore {
 
 	/** Overwrite CORE.md. Caller is responsible for any user confirmation. */
 	async writeCore(body: string): Promise<void> {
-		const bytes = new TextEncoder().encode(body);
-		if (bytes.byteLength > this.maxCoreBytes) {
+		// Buffer.byteLength counts UTF-8 bytes without allocating a copy
+		// of the input — cheaper than TextEncoder.encode().byteLength,
+		// which materialises the full Uint8Array we don't otherwise need.
+		const byteLength = Buffer.byteLength(body, "utf-8");
+		if (byteLength > this.maxCoreBytes) {
 			throw new Error(
-				`CORE.md write rejected: ${bytes.byteLength} > ${this.maxCoreBytes}`,
+				`CORE.md write rejected: ${byteLength} > ${this.maxCoreBytes}`,
 			);
 		}
 		await mkdir(this.dir, { recursive: true });
-		await writeFile(this.corePath, bytes);
+		await writeFile(this.corePath, body, "utf-8");
 	}
 
 	/**
@@ -166,10 +171,21 @@ export class MemoryStore {
 		}
 	}
 
-	/** Read a specific daily file by ISO date. Empty string if missing. */
+	/**
+	 * Read a specific daily file by ISO date. Empty string if missing.
+	 * Same size-gate rationale as readCore — search() reads up to 30 daily
+	 * files in parallel, so one accidentally-bloated entry could otherwise
+	 * pull GBs into memory at once.
+	 */
 	async readDaily(date: string): Promise<string> {
 		const file = path.join(this.dailyDir, `${date}.md`);
 		try {
+			const s = await stat(file);
+			if (s.size > this.maxCoreBytes) {
+				throw new Error(
+					`daily/${date}.md exceeds ${this.maxCoreBytes} bytes (${s.size})`,
+				);
+			}
 			return await readFile(file, "utf-8");
 		} catch (err) {
 			if (!isEnoent(err)) throw err;
@@ -210,7 +226,17 @@ export class MemoryStore {
 		// latency, bounded only by how many files the kernel will open
 		// concurrently.
 		const [coreText, dates] = await Promise.all([
-			this.readCore().catch(() => ""),
+			this.readCore().catch((err) => {
+				// Failing to read CORE means search results are incomplete;
+				// log the cause so the user can fix (e.g. shrink an oversize
+				// file) instead of silently degrading.
+				console.warn(
+					`[memory] readCore failed during search: ${
+						err instanceof Error ? err.message : String(err)
+					}`,
+				);
+				return "";
+			}),
 			this.listDailyDates(),
 		]);
 		const dailyResults = await Promise.all(
