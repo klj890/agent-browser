@@ -182,11 +182,9 @@ export async function createAgentHostForTab(
 		blockedDomains: policy.blockedDomains,
 	};
 	const tabController = createTabControllerForAgent(tabManager, activeAgentTab);
-	// Hoist the task-id capture so the soul_amend skill below can stamp the
-	// audit event with the right task. The pre-llm hook sets the ref before
-	// any tool call runs, so by the time amend() executes the ref is fresh;
-	// "unknown" only ever appears if a skill is invoked outside an LLM step
-	// (none today, but tests construct skills directly).
+	// Captured by closures (soul_amend audit, post-tool spill, audit hooks);
+	// the pre-llm hook below mutates this before any tool call. "unknown"
+	// only surfaces when a skill runs outside an LLM step (e.g. tests).
 	let currentTaskIdRef: string | undefined;
 	const currentTaskId = () => currentTaskIdRef ?? "unknown";
 	const externalSkills = deps.externalMcp?.skills() ?? [];
@@ -300,10 +298,6 @@ export async function createAgentHostForTab(
 		postToolHooks.push(toolResultSizeHook);
 	}
 
-	// `currentTaskIdRef` / `currentTaskId` declared upfront (above), so the
-	// soul_amend skill closure can capture the same ref. The pre-llm hook
-	// below mutates it before any tool call.
-	//
 	// Resolve the URL of the Agent's *current* logical tab at call time, so
 	// confirmation prompts correctly attribute the origin after tabs_switch
 	// or in-tab navigation. Static capture would freeze it at construction.

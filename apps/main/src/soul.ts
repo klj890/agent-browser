@@ -255,14 +255,15 @@ export class FileSoulProvider implements MutableSoulProvider {
 		const safeBullet = defangFence(bullet);
 
 		let beforeBody: string;
+		let beforeBuf: Buffer;
 		try {
-			const buf = await this.fs.readFile(this.path);
-			if (buf.byteLength > SOUL_MAX_BYTES) {
+			beforeBuf = await this.fs.readFile(this.path);
+			if (beforeBuf.byteLength > SOUL_MAX_BYTES) {
 				throw new Error(
-					`soul.md exceeds ${SOUL_MAX_BYTES} bytes (${buf.byteLength})`,
+					`soul.md exceeds ${SOUL_MAX_BYTES} bytes (${beforeBuf.byteLength})`,
 				);
 			}
-			beforeBody = buf.toString("utf8");
+			beforeBody = beforeBuf.toString("utf8");
 		} catch (err) {
 			if (!isEnoent(err)) throw err;
 			// File not yet on disk — operate against the seeded default so the
@@ -270,6 +271,7 @@ export class FileSoulProvider implements MutableSoulProvider {
 			// shown. The audit `before_hash` reflects this synthetic basis,
 			// which is what an auditor diffing the trace will compare against.
 			beforeBody = this.defaultBody;
+			beforeBuf = Buffer.from(beforeBody, "utf8");
 		}
 
 		const { body: afterBody, createdSection } = insertBullet(
@@ -286,8 +288,11 @@ export class FileSoulProvider implements MutableSoulProvider {
 			);
 		}
 
-		const beforeHash = sha256(Buffer.from(beforeBody, "utf8"));
-		const afterHash = sha256(afterBuf);
+		// Hash directly off the buffers — beforeBuf came straight from disk
+		// (or `Buffer.from(defaultBody)` once when missing); afterBuf is the
+		// post-write payload. Avoids a second utf-8 encode of beforeBody.
+		const beforeHash = createHash("sha256").update(beforeBuf).digest("hex");
+		const afterHash = createHash("sha256").update(afterBuf).digest("hex");
 
 		// Atomic write: temp file in the same directory + rename. POSIX
 		// rename within one filesystem is atomic; on Windows it's "best
@@ -307,7 +312,7 @@ export class FileSoulProvider implements MutableSoulProvider {
 
 		return {
 			section: safeSection,
-			bulletExcerpt: truncate(safeBullet, 200),
+			bulletExcerpt: safeBullet.slice(0, 200),
 			beforeHash,
 			afterHash,
 			byteSize: afterBuf.byteLength,
@@ -382,18 +387,16 @@ export function insertBullet(
 	return { body: lines.join("\n"), createdSection: false };
 }
 
+/**
+ * Strip the canonical SOUL fence tokens from arbitrary text. Used both at
+ * prompt-render time (so user-edited body can't close the outer fence) and
+ * at amend time (so the LLM can't smuggle a fence into the file). Keep
+ * accepting whitespace variants — downstream audit tooling matches loosely.
+ */
 function defangFence(s: string): string {
 	return s
 		.replace(/<!--\s*soul:start\s*-->/g, "<!-- soul:start-escaped -->")
 		.replace(/<!--\s*soul:end\s*-->/g, "<!-- soul:end-escaped -->");
-}
-
-function sha256(buf: Buffer): string {
-	return createHash("sha256").update(buf).digest("hex");
-}
-
-function truncate(s: string, n: number): string {
-	return s.length > n ? s.slice(0, n) : s;
 }
 
 /**
@@ -402,15 +405,9 @@ function truncate(s: string, n: number): string {
  * whitespace body yields the original prompt unchanged.
  */
 export function appendSoulToPrompt(systemPrompt: string, soul: string): string {
-	// Defang any literal `soul:start` / `soul:end` fence tokens inside the
-	// user's body so the outer fence can't be closed prematurely or a fake
-	// inner section injected. Accept whitespace variants (`<!--soul:end-->`,
-	// `<!--  soul:end  -->`, etc.) because downstream audit tooling scans
-	// loosely; matching only the canonical spelling would leave an escape.
-	const body = soul
-		.trim()
-		.replace(/<!--\s*soul:start\s*-->/g, "<!-- soul:start-escaped -->")
-		.replace(/<!--\s*soul:end\s*-->/g, "<!-- soul:end-escaped -->");
+	// Defang fence tokens inside the user's body so the outer fence can't be
+	// closed prematurely or a fake inner section injected.
+	const body = defangFence(soul.trim());
 	if (body === "") return systemPrompt;
 	// trimEnd() on the prompt so appendPersonaBody's trailing "\n" doesn't
 	// compound with our "\n\n" into a run of three blank lines. Explicit
