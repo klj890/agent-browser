@@ -116,6 +116,13 @@ export interface FactoryDeps {
 export interface CreateAgentHostOpts {
 	tabId: string;
 	persona: Persona;
+	/**
+	 * Set to true when the host is created for a background routine (scheduled
+	 * task). High-risk write tools are stripped on top of the normal
+	 * policy + persona filter — a routine should never silently amend SOUL or
+	 * overwrite files without a user in the loop.
+	 */
+	scheduledTask?: boolean;
 }
 
 const DEFAULT_SYSTEM_PROMPT_PATH = path.join(
@@ -125,6 +132,17 @@ const DEFAULT_SYSTEM_PROMPT_PATH = path.join(
 );
 
 const MAX_TOOL_RESULT_BYTES = 4096;
+
+/**
+ * Tools blocked unconditionally for background routines (`scheduledTask:
+ * true`). A user isn't present to review or confirm these actions, so they
+ * must not run unattended regardless of AdminPolicy.allowedTools.
+ *
+ * - `soul_amend`: rewrites the system prompt for every future session —
+ *   high blast-radius, always needs an interactive confirmation.
+ * - `fs_write`: overwrites arbitrary sandbox files with no user visible.
+ */
+export const ROUTINE_BLOCKED_TOOLS = new Set(["soul_amend", "fs_write"]);
 
 export async function createAgentHostForTab(
 	deps: FactoryDeps,
@@ -223,7 +241,7 @@ export async function createAgentHostForTab(
 		// later keeps only names in policy.allowedTools anyway.
 		...externalSkills,
 	];
-	const skills = filterSkills(allSkills, policy, persona);
+	const skills = filterSkills(allSkills, policy, persona, opts.scheduledTask);
 
 	// system.md and SOUL.md are independent disk reads — run them in parallel.
 	const [systemPrompt, soulBody] = await Promise.all([
@@ -745,6 +763,7 @@ function filterSkills(
 	all: Skill[],
 	policy: AdminPolicy,
 	persona: Persona,
+	scheduledTask?: boolean,
 ): Skill[] {
 	const policyAllowed = new Set(policy.allowedTools);
 	const personaAllowed = persona.frontmatter.allowedTools
@@ -757,6 +776,9 @@ function filterSkills(
 			? new Set(policy.allowedExternalMcpPrefixes)
 			: null; // null sentinel → unrestricted
 	return all.filter((s) => {
+		// Scheduled routines run without a user present — strip tools that
+		// require interactive confirmation or have high write blast-radius.
+		if (scheduledTask && ROUTINE_BLOCKED_TOOLS.has(s.name)) return false;
 		if (isExternalMcpSkillName(s.name)) {
 			// External tool: policy.allowedTools is bypassed (admin can't
 			// enumerate external tool names), but the prefix allowlist
