@@ -125,6 +125,28 @@ export interface InjectionFlagEvent {
 	snippet_hash: string;
 }
 
+/**
+ * Agent-initiated edit to SOUL.md (P2 §2.2 self-evolution). Recorded when
+ * the user approves a `soul_amend` tool call so a later auditor can replay
+ * "what new boundary/preference did the Agent slip into the system prompt
+ * on this date, and was the file content before/after what we expected".
+ *
+ * Payload is intentionally narrow: section + 200-char bullet excerpt +
+ * before/after content hashes. The full bullet body lives in tool.call's
+ * `args_hash` slot already; duplicating it here would balloon every event.
+ */
+export interface SoulAmendEvent {
+	event: "soul.amend";
+	ts: number;
+	task_id: string;
+	section: string;
+	bullet_excerpt: string;
+	before_hash: string;
+	after_hash: string;
+	byte_size: number;
+	created_section: boolean;
+}
+
 export type AuditEvent =
 	| LlmCallPreEvent
 	| LlmCallPostEvent
@@ -134,7 +156,8 @@ export type AuditEvent =
 	| TaskEndEvent
 	| TaskStateChangeEvent
 	| PolicyChangeEvent
-	| InjectionFlagEvent;
+	| InjectionFlagEvent
+	| SoulAmendEvent;
 
 // ---------------------------------------------------------------------------
 // Hash / summarize helpers

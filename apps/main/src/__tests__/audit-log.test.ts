@@ -119,11 +119,23 @@ function sample(event: AuditEvent["event"], taskId = "t1"): AuditEvent {
 				pattern: "ignore-instructions",
 				snippet_hash: "s",
 			};
+		case "soul.amend":
+			return {
+				event,
+				ts,
+				task_id: taskId,
+				section: "Hard boundaries",
+				bullet_excerpt: "never email without consent",
+				before_hash: "b".repeat(64),
+				after_hash: "a".repeat(64),
+				byte_size: 1234,
+				created_section: false,
+			};
 	}
 }
 
 describe("AuditLog — event appending", () => {
-	it("appends all 9 event types and every line round-trips as JSON", async () => {
+	it("appends all 10 event types and every line round-trips as JSON", async () => {
 		const log = new AuditLog({
 			dir: tmp,
 			now: () => Date.UTC(2026, 3, 18, 12),
@@ -138,6 +150,7 @@ describe("AuditLog — event appending", () => {
 			"task.state-change",
 			"policy.change",
 			"injection.flag",
+			"soul.amend",
 		];
 		for (const e of events) {
 			await log.append(sample(e));
