@@ -154,6 +154,7 @@ async function runOneTask(
 	prompt: string,
 	target: (chunk: StreamChunk) => void,
 	trackActive: { host?: AgentHost; taskId?: string } | null,
+	scheduledTask?: boolean,
 ): Promise<string> {
 	const tabId = deps.tabManager.getActiveId();
 	if (!tabId) throw new Error("no active tab");
@@ -176,7 +177,7 @@ async function runOneTask(
 			externalMcp: deps.externalMcp,
 			memory: deps.memory,
 		},
-		{ tabId, persona: use },
+		{ tabId, persona: use, scheduledTask },
 	);
 	if (trackActive) trackActive.host = host;
 	const task = deps.taskStore.create({
@@ -272,11 +273,9 @@ function createOrchestrator(deps: OrchestratorDeps): AgentOrchestrator & {
 		 * Background variant that awaits a terminal TaskStateStore transition
 		 * before resolving. Wires AbortSignal → taskStore.abort so a routine's
 		 * stale-timeout actually kills the Agent rather than just orphaning
-		 * the in-flight IIFE.
-		 *
-		 * `scheduledTask` flag is accepted for future use (restricted tool
-		 * set for background routines) — currently unused but kept at the
-		 * boundary so callers don't have to re-plumb later.
+		 * the in-flight IIFE. `scheduledTask: true` strips high-risk write tools
+		 * (ROUTINE_BLOCKED_TOOLS) so routines can't amend SOUL or overwrite files
+		 * without a user present.
 		 */
 		async runBackgroundTaskToCompletion(prompt, opts) {
 			const startedAt = Date.now();
@@ -291,7 +290,13 @@ function createOrchestrator(deps: OrchestratorDeps): AgentOrchestrator & {
 			const capture = (c: StreamChunk) => {
 				if (c.type === "error") errorMessage = c.message;
 			};
-			const taskId = await runOneTask(deps, prompt, capture, null);
+			const taskId = await runOneTask(
+				deps,
+				prompt,
+				capture,
+				null,
+				opts?.scheduledTask,
+			);
 			const onAbort = () => {
 				try {
 					deps.taskStore.abort(taskId);
