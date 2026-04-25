@@ -47,6 +47,7 @@ import {
 import { McpConfigFileStore } from "./mcp-config.js";
 import { McpExternalManager } from "./mcp-external-manager.js";
 import { McpServerHost } from "./mcp-server.js";
+import { MdmPoller } from "./mdm-poller.js";
 import { MemoryStore } from "./memory.js";
 import { PersonaManager } from "./persona-manager.js";
 import { syncPersonasOnce } from "./persona-sync.js";
@@ -76,13 +77,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * Minimal PolicyProvider exposed to other Stage modules. Holds the latest
- * loaded AdminPolicy in memory (Stage 5.2 read-only access). Stage 5.3+ can
- * swap in a refresh-on-update flow; for now, loaded once at boot.
+ * loaded AdminPolicy in memory (Stage 5.2 read-only access).
+ *
+ * MDM overlay (Stage 20): when `policy.mdm` is configured, MdmPoller calls
+ * `applyMdm` on each successful fetch. `get()` then returns the remote policy
+ * with `mdm` always restored from local — remote can't change its own URL.
  */
 export interface PolicyProvider {
 	store: AdminPolicyStore;
 	get(): AdminPolicy;
 	refresh(): Promise<AdminPolicy>;
+	/** Apply a freshly-fetched MDM policy. Remote overrides everything except `mdm`. */
+	applyMdm(remote: AdminPolicy): void;
 }
 
 declare global {
@@ -92,18 +98,30 @@ declare global {
 
 async function initPolicyProvider(): Promise<PolicyProvider> {
 	const store = new AdminPolicyStore();
-	let cached: AdminPolicy = DEFAULT_POLICY;
+	let local: AdminPolicy = DEFAULT_POLICY;
 	try {
-		cached = await store.load();
+		local = await store.load();
 	} catch (err) {
 		console.warn("[admin-policy] load failed, using DEFAULT_POLICY:", err);
 	}
+	// MDM overlay: null = no MDM fetch yet; non-null = last successful remote fetch.
+	let mdmOverlay: AdminPolicy | null = null;
+
 	const provider: PolicyProvider = {
 		store,
-		get: () => cached,
-		refresh: async () => {
-			cached = await store.load();
-			return cached;
+		get() {
+			if (!mdmOverlay) return local;
+			// Remote policy replaces local entirely, but `mdm` config (URL /
+			// interval) is always from local — prevents the remote endpoint from
+			// disabling MDM or redirecting to a different server.
+			return { ...mdmOverlay, mdm: local.mdm };
+		},
+		async refresh() {
+			local = await store.load();
+			return provider.get();
+		},
+		applyMdm(remote) {
+			mdmOverlay = remote;
 		},
 	};
 	globalThis.__policyProvider = provider;
@@ -795,9 +813,25 @@ function registerSlashIpc(
 
 let globalTaskStore: TaskStateStore | undefined;
 
+let globalMdmPoller: MdmPoller | undefined;
+
 app.whenReady().then(async () => {
 	const policy = await initPolicyProvider();
 	registerPolicyIpc(policy);
+
+	// MDM (Stage 20): if `mdm.url` is configured, start polling immediately.
+	// The poller runs for the lifetime of the app; `app.on("before-quit")`
+	// stops it so no dangling interval fires during shutdown.
+	const mdmCfg = policy.get().mdm;
+	if (mdmCfg) {
+		globalMdmPoller = new MdmPoller({
+			url: mdmCfg.url,
+			pollIntervalMs: mdmCfg.pollIntervalMs,
+			onFetched: (remote) => policy.applyMdm(remote),
+		});
+		globalMdmPoller.start();
+	}
+
 	const personaManager = await initPersonaManager();
 	const infra = createWindowInfra(policy);
 	globalTaskStore = infra.taskStore;
@@ -819,6 +853,10 @@ app.whenReady().then(async () => {
 app.on("window-all-closed", () => {
 	globalShortcut.unregisterAll();
 	if (process.platform !== "darwin") app.quit();
+});
+
+app.on("before-quit", () => {
+	globalMdmPoller?.stop();
 });
 
 app.on("activate", async () => {

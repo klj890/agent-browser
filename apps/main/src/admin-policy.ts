@@ -155,6 +155,27 @@ export const AdminPolicySchema = z.object({
 		allowMv3: z.boolean().default(true),
 		allowedExtensionIds: z.array(z.string()).default([]),
 	}),
+	/**
+	 * Enterprise MDM (Stage 20). When present the browser fetches policy JSON
+	 * from `url` on startup and then every `pollIntervalMs` milliseconds.
+	 * A successful fetch replaces the effective policy in memory (keychain copy
+	 * is untouched). If the endpoint is unreachable the last-known policy
+	 * (local or previously fetched remote) remains active.
+	 *
+	 * The `mdm` sub-object itself is ALWAYS read from local keychain — a remote
+	 * endpoint cannot change its own URL or poll interval. This prevents a
+	 * misconfigured or compromised server from permanently disabling MDM.
+	 */
+	mdm: z
+		.object({
+			url: z.string().url(),
+			/**
+			 * How often to re-fetch the remote policy. Minimum 60 s to avoid
+			 * hammering the MDM endpoint. Default: 1 hour.
+			 */
+			pollIntervalMs: z.number().int().min(60_000).default(3_600_000),
+		})
+		.optional(),
 });
 
 export type AdminPolicy = z.infer<typeof AdminPolicySchema>;
