@@ -43,7 +43,7 @@ import {
 	ToolDenied,
 	ToolResultTooLargeError,
 } from "./agent-host.js";
-import type { AuditLog } from "./audit-log.js";
+import { type AuditLog, hashPayload } from "./audit-log.js";
 import type { AuthVault } from "./auth-vault.js";
 import type { ConfirmationHandler } from "./confirmation.js";
 import { createDefaultStreamFn } from "./llm/factory.js";
@@ -225,16 +225,17 @@ export async function createAgentHostForTab(
 	];
 	const skills = filterSkills(allSkills, policy, persona);
 
-	const systemPrompt = await renderTemplate(
-		deps.systemPromptPath ?? DEFAULT_SYSTEM_PROMPT_PATH,
-		{
+	// system.md and SOUL.md are independent disk reads — run them in parallel.
+	const [systemPrompt, soulBody] = await Promise.all([
+		renderTemplate(deps.systemPromptPath ?? DEFAULT_SYSTEM_PROMPT_PATH, {
 			persona_name: persona.name,
 			persona_description: persona.description,
 			autonomy: policy.autonomy,
 			maxStepsPerTask: policy.costGuard.maxStepsPerTask,
 			maxUsdPerTask: policy.costGuard.maxUsdPerTask,
-		},
-	);
+		}),
+		deps.soul ? deps.soul.load() : Promise.resolve(null as string | null),
+	]);
 
 	const redaction: SensitiveWordFilter =
 		createRedactionPipelineFromPolicy(policy);
@@ -268,11 +269,10 @@ export async function createAgentHostForTab(
 	// without the user's declared hard boundaries — exactly the scenario
 	// the feature exists to prevent. Let it throw; the session fails to
 	// start, the user sees the cause and fixes the file.
-	let finalSystemPrompt = afterPersona;
-	if (deps.soul) {
-		const soulBody = await deps.soul.load();
-		finalSystemPrompt = appendSoulToPrompt(afterPersona, soulBody);
-	}
+	const finalSystemPrompt =
+		soulBody != null
+			? appendSoulToPrompt(afterPersona, soulBody)
+			: afterPersona;
 
 	// If tool-result-storage is wired, add the meta-skill so the LLM can
 	// rehydrate spilled results on demand. The typed meta-skill widens to
@@ -420,7 +420,7 @@ function buildToolResultSpillHook(
 
 function hashArgs(args: unknown): string {
 	try {
-		return String(JSON.stringify(args ?? null).length);
+		return hashPayload(args ?? null);
 	} catch {
 		return "0";
 	}
@@ -526,12 +526,6 @@ export function createTabControllerForAgent(
 }
 
 /**
- * Tool names of the form `<prefix>__<remote>` are externally-defined
- * (P2 §2.6 MCP client) — configured out-of-band by the user, not enumerable
- * in AdminPolicy.allowedTools. The separator is `__`; first-party tools
- * that need an underscore use a single one (e.g. `tabs_open`).
- */
-/**
  * Node-backed FsDriver used in production. Wraps the node:fs/promises
  * subset the skill layer calls — small enough that we don't need a
  * separate driver module.
@@ -539,10 +533,9 @@ export function createTabControllerForAgent(
 const nodeFsDriver: FsDriver = {
 	async readFile(p) {
 		const buf = await readFile(p);
-		// Node Buffer extends Uint8Array, but we return a plain view so the
-		// skill layer's Uint8Array-only contract holds if the driver is
-		// ever reused in a non-Node environment.
-		return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+		// Node Buffer may share a pooled ArrayBuffer (byteOffset > 0). Copy
+		// into an isolated Uint8Array so callers don't alias the pool slab.
+		return new Uint8Array(buf);
 	},
 	async writeFile(p, data, opts) {
 		// Pass the `flag` through so fs_write's `createOnly` ⇒ `wx`
@@ -729,6 +722,12 @@ function createMemorySkills(memory: MemoryStore): Skill[] {
 	];
 }
 
+/**
+ * Tool names of the form `<prefix>__<remote>` are externally-defined
+ * (P2 §2.6 MCP client) — configured out-of-band by the user, not enumerable
+ * in AdminPolicy.allowedTools. The separator is `__`; first-party tools
+ * that need an underscore use a single one (e.g. `tabs_open`).
+ */
 export function isExternalMcpSkillName(name: string): boolean {
 	return name.includes("__");
 }

@@ -10,11 +10,6 @@
  *   - **SOUL**:    "how I want the Agent to behave"  (stable, per-user)
  *   - **Persona**: "what role for this task/domain"  (short-lived, per-domain)
  *   - **Memory**:  "what the Agent knows about me"   (factual, future stage)
- *
- * This round implements **read-only** injection. Agent-initiated updates
- * (the "SOUL.md auto-evolution" from BrowserOS) are deliberately deferred
- * to a separate PR because they need AuditLog integration + confirmation
- * gate — self-modifying system prompt is high-trust territory.
  */
 import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
@@ -178,11 +173,6 @@ export class FileSoulProvider implements MutableSoulProvider {
 
 	async load(): Promise<string> {
 		try {
-			// Read as Buffer so we can bound by real byte count. Using
-			// `readFile(..., "utf8").length` counts UTF-16 code units — a
-			// file of Chinese/emoji text would under-report its size and
-			// sneak past the 64KB cap. `readFile(path)` with no encoding
-			// already returns Promise<Buffer>, no cast needed.
 			const buf = await this.fs.readFile(this.path);
 			if (buf.byteLength > SOUL_MAX_BYTES) {
 				throw new Error(
@@ -288,16 +278,11 @@ export class FileSoulProvider implements MutableSoulProvider {
 			);
 		}
 
-		// Hash directly off the buffers — beforeBuf came straight from disk
-		// (or `Buffer.from(defaultBody)` once when missing); afterBuf is the
-		// post-write payload. Avoids a second utf-8 encode of beforeBody.
 		const beforeHash = createHash("sha256").update(beforeBuf).digest("hex");
 		const afterHash = createHash("sha256").update(afterBuf).digest("hex");
 
-		// Atomic write: temp file in the same directory + rename. POSIX
-		// rename within one filesystem is atomic; on Windows it's "best
-		// effort" but still does not produce a torn read. Random suffix
-		// avoids collisions if two providers point at the same file.
+		// Atomic write: temp file in the same directory + rename. Random
+		// suffix avoids collisions if two providers point at the same file.
 		await mkdir(path.dirname(this.path), { recursive: true });
 		const tmp = `${this.path}.${randomBytes(6).toString("hex")}.tmp`;
 		try {
