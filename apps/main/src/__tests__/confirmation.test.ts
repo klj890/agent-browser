@@ -3,6 +3,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { type AdminPolicy, DEFAULT_POLICY } from "../admin-policy.js";
+import { hookLevelHighRiskFlags } from "../agent-host-factory.js";
 import {
 	ConfirmationHandler,
 	type ConfirmationRequest,
@@ -73,6 +74,32 @@ describe("needsConfirmation (pure matrix)", () => {
 			forceConfirmActions: [], // nothing forced
 		});
 		expect(needsConfirmation(p, "act", ["form_submit"])).toBe(false);
+	});
+
+	it("soul_modify is in default forceConfirmActions and overrides any autonomy", () => {
+		// Use the unmodified DEFAULT_POLICY so we exercise the shipped
+		// default — regression guard against a future refactor that drops
+		// soul_modify from the default forceConfirmActions list.
+		expect(DEFAULT_POLICY.forceConfirmActions).toContain("soul_modify");
+		// Even autonomous: a soul_modify flag forces the prompt.
+		const p = policyWith({ autonomy: "autonomous" });
+		expect(needsConfirmation(p, "soul_amend", ["soul_modify"])).toBe(true);
+		expect(needsConfirmation(p, "soul_amend", [])).toBe(false);
+	});
+});
+
+describe("hookLevelHighRiskFlags", () => {
+	it("flags soul_amend with soul_modify so the confirmation hook trips force-confirm", () => {
+		expect(hookLevelHighRiskFlags("soul_amend")).toEqual(["soul_modify"]);
+	});
+
+	it("returns no flags for tools whose risk is decided at runtime (e.g. act, goto)", () => {
+		// `act` flags risk inside its own execute() — exposing it here
+		// would double-flag form submits and surface false positives in
+		// the audit log.
+		expect(hookLevelHighRiskFlags("act")).toEqual([]);
+		expect(hookLevelHighRiskFlags("goto")).toEqual([]);
+		expect(hookLevelHighRiskFlags("snapshot")).toEqual([]);
 	});
 });
 

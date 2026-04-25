@@ -55,7 +55,11 @@ import {
 	createRedactionPipelineFromPolicy,
 	type SensitiveWordFilter,
 } from "./redaction-pipeline.js";
-import { appendSoulToPrompt, type SoulProvider } from "./soul.js";
+import {
+	appendSoulToPrompt,
+	type MutableSoulProvider,
+	type SoulProvider,
+} from "./soul.js";
 import type { TabManager } from "./tab-manager.js";
 import type { TaskStateStore } from "./task-state.js";
 import {
@@ -178,6 +182,13 @@ export async function createAgentHostForTab(
 		blockedDomains: policy.blockedDomains,
 	};
 	const tabController = createTabControllerForAgent(tabManager, activeAgentTab);
+	// Hoist the task-id capture so the soul_amend skill below can stamp the
+	// audit event with the right task. The pre-llm hook sets the ref before
+	// any tool call runs, so by the time amend() executes the ref is fresh;
+	// "unknown" only ever appears if a skill is invoked outside an LLM step
+	// (none today, but tests construct skills directly).
+	let currentTaskIdRef: string | undefined;
+	const currentTaskId = () => currentTaskIdRef ?? "unknown";
 	const externalSkills = deps.externalMcp?.skills() ?? [];
 	// Filesystem skills (P2 §2.7). Always built so the LLM sees they exist
 	// even when `fsSandboxDirs` is empty — callers get a clean
@@ -192,6 +203,14 @@ export async function createAgentHostForTab(
 		sep: path.sep,
 	});
 	const memorySkills = deps.memory ? createMemorySkills(deps.memory) : [];
+	// soul_amend is gated behind both `deps.soul` being a MutableSoulProvider
+	// AND the admin including `soul_amend` in policy.allowedTools (filterSkills
+	// strips it otherwise). Without the explicit admin opt-in the LLM doesn't
+	// even see the tool exists — same posture as memory write tools.
+	const soulSkills =
+		deps.soul && isMutableSoul(deps.soul)
+			? createSoulSkills(deps.soul, deps.auditLog, currentTaskId)
+			: [];
 	const allSkills = [
 		...createBrowserToolsSkills(ctx),
 		...createTabsSkills({
@@ -200,6 +219,7 @@ export async function createAgentHostForTab(
 		}),
 		...fsSkills,
 		...memorySkills,
+		...soulSkills,
 		// External MCP tools go LAST so an externally-configured tool
 		// can never shadow a built-in by sharing its name — filterSkills
 		// later keeps only names in policy.allowedTools anyway.
@@ -280,8 +300,10 @@ export async function createAgentHostForTab(
 		postToolHooks.push(toolResultSizeHook);
 	}
 
-	let currentTaskIdRef: string | undefined;
-	const currentTaskId = () => currentTaskIdRef ?? "unknown";
+	// `currentTaskIdRef` / `currentTaskId` declared upfront (above), so the
+	// soul_amend skill closure can capture the same ref. The pre-llm hook
+	// below mutates it before any tool call.
+	//
 	// Resolve the URL of the Agent's *current* logical tab at call time, so
 	// confirmation prompts correctly attribute the origin after tabs_switch
 	// or in-tab navigation. Static capture would freeze it at construction.
@@ -359,13 +381,30 @@ function buildConfirmationHook(
 		const decision = await confirmation.decide({
 			tool: ctx.call.name,
 			args: ctx.call.args,
-			highRiskFlags: [], // browser-tools flagHighRisk runs inside act.execute; hook-level flags are empty until Stage 7.3 extends the context
+			// browser-tools flagHighRisk runs inside act.execute (its flags
+			// are surfaced in the result, not at hook level). Per-tool
+			// flags we *do* know up-front go here. Today only `soul_amend`
+			// — its blast radius (rewrites the system prompt for every
+			// future task) makes it always-confirm via forceConfirmActions.
+			highRiskFlags: hookLevelHighRiskFlags(ctx.call.name),
 			tabUrl: getTabUrl(),
 		});
 		if (decision !== "approved") {
 			throw new ToolDenied(decision);
 		}
 	};
+}
+
+/**
+ * Per-tool high-risk flags that must reach the confirmation handler at hook
+ * time (i.e. before the tool executes). Stays a simple table — only tools
+ * whose risk class is fully derivable from their *name* belong here. Tools
+ * whose risk depends on runtime args (like `act`) flag inside the tool
+ * implementation, not here.
+ */
+export function hookLevelHighRiskFlags(tool: string): readonly string[] {
+	if (tool === "soul_amend") return ["soul_modify"];
+	return [];
 }
 
 function buildToolResultSpillHook(
@@ -564,6 +603,89 @@ const nodeFsDriver: FsDriver = {
 		return realpath(p);
 	},
 };
+
+/**
+ * SOUL self-evolution skill (P2 §2.2). Always confirmation-gated by the
+ * confirmation hook (forceConfirmActions includes `soul_modify`); always
+ * audit-logged when an `auditLog` is present so a later auditor can trace
+ * "what new boundary did the Agent slip into the system prompt?".
+ *
+ * Wiring constraints:
+ *   - Only registered when the SoulProvider impl supports writes.
+ *   - Filtered out by filterSkills unless admin adds `soul_amend` to
+ *     policy.allowedTools (it's deliberately NOT in the default list).
+ */
+const SoulAmendInput = z.object({
+	section: z
+		.string()
+		.min(1)
+		.describe(
+			"Markdown heading text under which to append the bullet, without the leading `## `. Case-insensitive match. Created at file end if absent.",
+		),
+	bullet: z
+		.string()
+		.min(1)
+		.describe(
+			"One-line bullet body (no leading `- `, no newlines). The user-stated boundary or preference to remember.",
+		),
+});
+
+function createSoulSkills(
+	soul: MutableSoulProvider,
+	auditLog: AuditLog | undefined,
+	getTaskId: () => string,
+): Skill[] {
+	return [
+		{
+			name: "soul_amend",
+			description:
+				"Append a single bullet under a section of SOUL.md (the user's long-lived preferences/boundaries file). Use ONLY when the user explicitly tells you to remember a new behavioural rule (e.g. 'next time, never X'). Always requires user confirmation regardless of autonomy — do not call speculatively.",
+			inputSchema: SoulAmendInput,
+			execute: async (input) => {
+				const parsed = input as z.infer<typeof SoulAmendInput>;
+				const result = await soul.amend({
+					section: parsed.section,
+					bullet: parsed.bullet,
+				});
+				if (auditLog) {
+					try {
+						await auditLog.append({
+							event: "soul.amend",
+							ts: Date.now(),
+							task_id: getTaskId(),
+							section: result.section,
+							bullet_excerpt: result.bulletExcerpt,
+							before_hash: result.beforeHash,
+							after_hash: result.afterHash,
+							byte_size: result.byteSize,
+							created_section: result.createdSection,
+						});
+					} catch (err) {
+						// Audit-log write failure shouldn't reverse a successful
+						// SOUL edit, but it MUST be visible — silently
+						// dropping an edit means a later auditor sees a SOUL
+						// change with no trace explaining who/why.
+						console.warn(
+							`[soul_amend] audit append failed: ${
+								err instanceof Error ? err.message : String(err)
+							}`,
+						);
+					}
+				}
+				return {
+					ok: true,
+					section: result.section,
+					createdSection: result.createdSection,
+					byteSize: result.byteSize,
+				};
+			},
+		},
+	];
+}
+
+function isMutableSoul(s: SoulProvider): s is MutableSoulProvider {
+	return typeof (s as MutableSoulProvider).amend === "function";
+}
 
 /**
  * Read-only Memory skills. Writes are NOT here — Agent self-write to

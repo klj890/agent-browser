@@ -39,6 +39,12 @@ export const HighRiskAction = z.enum([
 	"password_field_write",
 	"clipboard_write",
 	"geolocation_read",
+	// Agent-initiated edit to SOUL.md (P2 §2.2 self-evolution). SOUL drives
+	// behaviour for every future task — a wrong line silently shifts the
+	// Agent's posture across all personas, so we always prompt regardless
+	// of autonomy. Kept here (not as a separate gate) so admins can opt out
+	// by removing it from forceConfirmActions if they trust the loop.
+	"soul_modify",
 ]);
 export type HighRiskAction = z.infer<typeof HighRiskAction>;
 
@@ -126,6 +132,7 @@ export const AdminPolicySchema = z.object({
 			"file_upload",
 			"cross_origin_navigate",
 			"password_field_write",
+			"soul_modify",
 		]),
 	costGuard: CostGuard,
 	redaction: z.object({
