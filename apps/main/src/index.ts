@@ -47,6 +47,7 @@ import {
 import { McpConfigFileStore } from "./mcp-config.js";
 import { McpExternalManager } from "./mcp-external-manager.js";
 import { McpServerHost } from "./mcp-server.js";
+import { MemoryStore } from "./memory.js";
 import { PersonaManager } from "./persona-manager.js";
 import { syncPersonasOnce } from "./persona-sync.js";
 import { ProfileStore } from "./profile-store.js";
@@ -137,6 +138,7 @@ interface OrchestratorDeps {
 	vault: AuthVault;
 	soul: SoulProvider;
 	externalMcp: McpExternalManager;
+	memory: MemoryStore;
 }
 
 /**
@@ -172,6 +174,7 @@ async function runOneTask(
 			vault: deps.vault,
 			soul: deps.soul,
 			externalMcp: deps.externalMcp,
+			memory: deps.memory,
 		},
 		{ tabId, persona: use },
 	);
@@ -364,6 +367,7 @@ interface WindowInfra {
 	slashRegistry: ReturnType<typeof createDefaultSlashRegistry>;
 	vault: AuthVault;
 	soul: SoulProvider;
+	memory: MemoryStore;
 }
 
 function createWindowInfra(policy: PolicyProvider): WindowInfra {
@@ -402,6 +406,15 @@ function createWindowInfra(policy: PolicyProvider): WindowInfra {
 		path: path.join(userDataDir, "agent-browser", "soul.md"),
 		defaultBody: DEFAULT_SOUL_BODY,
 	});
+	const memory = new MemoryStore({
+		dir: path.join(userDataDir, "agent-browser", "memory"),
+	});
+	// Best-effort daily GC on startup. Failure is silent: a stale file is
+	// an inconvenience, not a correctness problem, and we'd rather ship
+	// the window than block on it.
+	void memory.gcDaily().catch((err) => {
+		console.warn("[memory] gcDaily failed:", err);
+	});
 	return {
 		auditLog,
 		toolResultStorage,
@@ -410,6 +423,7 @@ function createWindowInfra(policy: PolicyProvider): WindowInfra {
 		slashRegistry,
 		vault,
 		soul,
+		memory,
 	};
 }
 
@@ -655,6 +669,7 @@ async function createMainWindow(
 		vault: infra.vault,
 		soul: infra.soul,
 		externalMcp,
+		memory: infra.memory,
 	});
 	hostRef.get = () => orchestrator.getHost();
 
