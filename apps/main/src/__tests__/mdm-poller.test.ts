@@ -4,7 +4,7 @@
  * All tests inject a `fetchFn` mock so no real network calls are made.
  * The clock is not faked — interval behaviour is tested via `pollNow()`.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AdminPolicy } from "../admin-policy.js";
 import { DEFAULT_POLICY } from "../admin-policy.js";
 import { MdmPoller } from "../mdm-poller.js";
@@ -97,37 +97,26 @@ describe("MdmPoller — network / HTTP errors", () => {
 		await poller.pollNow();
 		expect(onFetched).not.toHaveBeenCalled();
 		expect(warns.some((w) => w.includes("ECONNREFUSED"))).toBe(true);
+		expect(warns.every((w) => w.startsWith("[mdm]"))).toBe(true);
 	});
 
-	it("HTTP 403: logs warning, does NOT call onFetched", async () => {
-		const onFetched = vi.fn();
-		const warns: string[] = [];
-		const poller = new MdmPoller({
-			url: MDM_URL,
-			pollIntervalMs: 3_600_000,
-			fetchFn: mockFetch({}, 403),
-			onFetched,
-			logger: { warn: (m) => warns.push(m) },
-		});
-		await poller.pollNow();
-		expect(onFetched).not.toHaveBeenCalled();
-		expect(warns.some((w) => w.includes("403"))).toBe(true);
-	});
-
-	it("HTTP 500: logs warning, does NOT call onFetched", async () => {
-		const onFetched = vi.fn();
-		const warns: string[] = [];
-		const poller = new MdmPoller({
-			url: MDM_URL,
-			pollIntervalMs: 3_600_000,
-			fetchFn: mockFetch({}, 500),
-			onFetched,
-			logger: { warn: (m) => warns.push(m) },
-		});
-		await poller.pollNow();
-		expect(onFetched).not.toHaveBeenCalled();
-		expect(warns.some((w) => w.includes("500"))).toBe(true);
-	});
+	it.each([401, 403, 500, 502])(
+		"HTTP %i: logs warning, does NOT call onFetched",
+		async (status) => {
+			const onFetched = vi.fn();
+			const warns: string[] = [];
+			const poller = new MdmPoller({
+				url: MDM_URL,
+				pollIntervalMs: 3_600_000,
+				fetchFn: mockFetch({}, status),
+				onFetched,
+				logger: { warn: (m) => warns.push(m) },
+			});
+			await poller.pollNow();
+			expect(onFetched).not.toHaveBeenCalled();
+			expect(warns.some((w) => w.includes(String(status)))).toBe(true);
+		},
+	);
 });
 
 describe("MdmPoller — invalid JSON / schema failures", () => {
@@ -186,12 +175,66 @@ describe("MdmPoller — invalid JSON / schema failures", () => {
 });
 
 describe("MdmPoller — concurrency guard", () => {
-	it("concurrent poll() calls: only one fetch runs at a time", async () => {
+	it("concurrent poll() calls: only one fetch runs, second logs skip", async () => {
 		let resolveFirst!: () => void;
 		const slow = vi.fn().mockImplementation(
 			() =>
 				new Promise<Response>((resolve) => {
 					resolveFirst = () =>
+						resolve({
+							ok: true,
+							status: 200,
+							json: async () => remotePolicy(),
+						} as Response);
+				}),
+		);
+		const onFetched = vi.fn();
+		const warns: string[] = [];
+		const poller = new MdmPoller({
+			url: MDM_URL,
+			pollIntervalMs: 3_600_000,
+			fetchFn: slow,
+			onFetched,
+			logger: { warn: (m) => warns.push(m) },
+		});
+
+		const p1 = poller.pollNow();
+		const p2 = poller.pollNow();
+		resolveFirst();
+		await Promise.all([p1, p2]);
+
+		expect(slow).toHaveBeenCalledOnce();
+		expect(onFetched).toHaveBeenCalledOnce();
+		// The skipped second poll surfaces an operational signal so admins can
+		// notice when the configured interval is shorter than fetch latency.
+		expect(warns.some((w) => w.includes("previous poll still running"))).toBe(
+			true,
+		);
+	});
+});
+
+describe("MdmPoller — stop()", () => {
+	it("stop() before start: a subsequent pollNow is a no-op", async () => {
+		const fetchFn = mockFetch(remotePolicy());
+		const onFetched = vi.fn();
+		const poller = new MdmPoller({
+			url: MDM_URL,
+			pollIntervalMs: 1_000,
+			fetchFn,
+			onFetched,
+		});
+		poller.stop();
+		await poller.pollNow();
+		expect(fetchFn).not.toHaveBeenCalled();
+		expect(onFetched).not.toHaveBeenCalled();
+	});
+
+	it("stop() during in-flight fetch drops the result (race protection)", async () => {
+		let resolveFetch!: () => void;
+		const slow = vi.fn().mockImplementation(
+			() =>
+				new Promise<Response>((resolve) => {
+					resolveFetch = () =>
 						resolve({
 							ok: true,
 							status: 200,
@@ -207,68 +250,33 @@ describe("MdmPoller — concurrency guard", () => {
 			onFetched,
 		});
 
-		// Start two polls concurrently — second should be a no-op
-		const p1 = poller.pollNow();
-		const p2 = poller.pollNow(); // polling flag set → skip
-		resolveFirst();
-		await Promise.all([p1, p2]);
+		const inFlight = poller.pollNow();
+		// stop() while the fetch is still pending — onFetched must NOT fire
+		// once the fetch eventually resolves (renderer may already be torn down).
+		poller.stop();
+		resolveFetch();
+		await inFlight;
 
-		// fetch was called only once (second poll was skipped)
 		expect(slow).toHaveBeenCalledOnce();
-		expect(onFetched).toHaveBeenCalledOnce();
+		expect(onFetched).not.toHaveBeenCalled();
 	});
 });
 
-describe("MdmPoller — stop()", () => {
-	it("stop() prevents further interval polls", () => {
-		vi.useFakeTimers();
-		const fetchFn = mockFetch(remotePolicy());
-		const onFetched = vi.fn();
+describe("MdmPoller — onFetched error boundary", () => {
+	it("onFetched throwing does not propagate; warns instead", async () => {
+		const warns: string[] = [];
 		const poller = new MdmPoller({
 			url: MDM_URL,
-			pollIntervalMs: 1_000,
-			fetchFn,
-			onFetched,
+			pollIntervalMs: 3_600_000,
+			fetchFn: mockFetch(remotePolicy()),
+			onFetched: () => {
+				throw new Error("downstream apply failed");
+			},
+			logger: { warn: (m) => warns.push(m) },
 		});
-		poller.start();
-		poller.stop();
-		// Advance time — no further polls should fire
-		vi.advanceTimersByTime(10_000);
-		// start() triggers one immediate poll (pollNow), then stop() clears the interval.
-		// The immediate poll's fetch is async so it may not have resolved yet.
-		// Key assertion: fetch was called at most once (the initial immediate poll).
-		expect(vi.mocked(fetchFn).mock.calls.length).toBeLessThanOrEqual(1);
-		vi.useRealTimers();
-	});
-});
-
-describe("PolicyProvider MDM overlay semantics (integration-style)", () => {
-	it("mdm field from local is preserved after applyMdm", () => {
-		// Verify the intended merge: remote wins for everything EXCEPT mdm config.
-		// We test this by directly simulating what PolicyProvider.get() does.
-		const localMdm = { url: MDM_URL, pollIntervalMs: 3_600_000 };
-		const local: AdminPolicy = { ...DEFAULT_POLICY, mdm: localMdm };
-		const remote: AdminPolicy = {
-			...DEFAULT_POLICY,
-			autonomy: "autonomous",
-			mdm: { url: "https://evil.example.com/p.json", pollIntervalMs: 60_000 },
-		};
-
-		// Simulate PolicyProvider.get() after applyMdm:
-		const effective = { ...remote, mdm: local.mdm };
-
-		expect(effective.autonomy).toBe("autonomous"); // remote overrides local
-		expect(effective.mdm).toEqual(localMdm); // mdm always from local
-	});
-
-	it("without mdm overlay, local policy is returned unchanged", () => {
-		const local: AdminPolicy = { ...DEFAULT_POLICY, autonomy: "manual" };
-		const mdmOverlay: AdminPolicy | null = null;
-
-		// Simulate PolicyProvider.get(): no MDM overlay → return local as-is.
-		const effective: AdminPolicy = mdmOverlay
-			? { ...(mdmOverlay as AdminPolicy), mdm: local.mdm }
-			: local;
-		expect(effective).toBe(local);
+		// Must not throw — the poller's contract is that onFetched failures
+		// are isolated so the next poll still runs.
+		await expect(poller.pollNow()).resolves.toBeUndefined();
+		expect(warns.some((w) => w.includes("onFetched threw"))).toBe(true);
 	});
 });
