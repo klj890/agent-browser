@@ -12,19 +12,27 @@
  */
 import { type AdminPolicy, AdminPolicySchema } from "./admin-policy.js";
 
+const LOG_PREFIX = "[mdm]";
+
 export interface MdmPollerOpts {
 	/** MDM endpoint URL. */
 	url: string;
 	/**
-	 * How often to re-fetch (ms). The first fetch happens synchronously on
-	 * `start()` — this interval governs subsequent polls.
+	 * How often to re-fetch (ms). The first fetch is scheduled immediately on
+	 * `start()` (fire-and-forget — `start()` returns synchronously, the first
+	 * task may run before the fetch resolves). This interval governs subsequent
+	 * polls.
 	 */
 	pollIntervalMs: number;
 	/** Called with each successfully parsed remote policy. */
 	onFetched: (remote: AdminPolicy) => void;
 	/** Injectable for tests; defaults to globalThis.fetch. */
 	fetchFn?: typeof globalThis.fetch;
-	/** Injectable logger; defaults to console.warn. */
+	/**
+	 * Injectable logger; defaults to a console.warn that prepends `[mdm]`.
+	 * Messages passed to `logger.warn` already include the prefix so injected
+	 * loggers (tests, audit collectors) see the same string the console does.
+	 */
 	logger?: { warn: (msg: string) => void };
 	/**
 	 * Per-request fetch timeout (ms). Prevents a slow MDM endpoint from
@@ -38,23 +46,30 @@ export class MdmPoller {
 	private readonly pollIntervalMs: number;
 	private readonly onFetched: (remote: AdminPolicy) => void;
 	private readonly fetchFn: typeof globalThis.fetch;
-	private readonly logger: { warn: (msg: string) => void };
+	private readonly warn: (msg: string) => void;
 	private readonly fetchTimeoutMs: number;
 
 	private timer: ReturnType<typeof setInterval> | undefined;
-	/** Prevent concurrent polls if a fetch takes longer than the interval. */
 	private polling = false;
+	/**
+	 * Once stopped, an in-flight fetch must NOT call `onFetched` even if its
+	 * promise resolves later — the app is shutting down and downstream
+	 * consumers may be torn down. Also gates `setInterval` callbacks that fire
+	 * after `clearInterval` on platforms with sloppy timer semantics.
+	 */
+	private stopped = false;
 
 	constructor(opts: MdmPollerOpts) {
 		this.url = opts.url;
 		this.pollIntervalMs = opts.pollIntervalMs;
 		this.onFetched = opts.onFetched;
 		this.fetchFn = opts.fetchFn ?? globalThis.fetch.bind(globalThis);
-		this.logger = opts.logger ?? { warn: (m) => console.warn(`[mdm] ${m}`) };
+		const userWarn = opts.logger?.warn ?? ((m: string) => console.warn(m));
+		this.warn = (msg) => userWarn(`${LOG_PREFIX} ${msg}`);
 		this.fetchTimeoutMs = opts.fetchTimeoutMs ?? 30_000;
 	}
 
-	/** Fetch once immediately, then schedule periodic polls. */
+	/** Schedules an immediate fetch (non-blocking) plus a periodic interval. */
 	start(): void {
 		void this.poll();
 		this.timer = setInterval(() => {
@@ -62,21 +77,26 @@ export class MdmPoller {
 		}, this.pollIntervalMs);
 	}
 
-	/** Stop periodic polling. Any in-flight fetch completes but its result is discarded. */
+	/** Stop periodic polling. Any in-flight fetch's result is discarded. */
 	stop(): void {
+		this.stopped = true;
 		if (this.timer !== undefined) {
 			clearInterval(this.timer);
 			this.timer = undefined;
 		}
 	}
 
-	/** Exposed for tests — allows triggering a poll without waiting for the interval. */
+	/** @internal Test-only entry point — production code should call `start()`. */
 	async pollNow(): Promise<void> {
 		await this.poll();
 	}
 
 	private async poll(): Promise<void> {
-		if (this.polling) return; // skip if previous poll is still running
+		if (this.stopped) return;
+		if (this.polling) {
+			this.warn("previous poll still running, skipping");
+			return;
+		}
 		this.polling = true;
 		try {
 			await this.fetchAndApply();
@@ -86,6 +106,23 @@ export class MdmPoller {
 	}
 
 	private async fetchAndApply(): Promise<void> {
+		const remote = await this.fetchRemote();
+		if (remote === null) return;
+		// Stopped between fetch resolution and apply — drop the result.
+		if (this.stopped) return;
+		try {
+			this.onFetched(remote);
+		} catch (err) {
+			this.warn(`onFetched threw: ${errMsg(err)}`);
+		}
+	}
+
+	/**
+	 * Fetch + parse + validate. Returns the parsed policy or `null` on any
+	 * failure (logged). Centralising the failure paths keeps `fetchAndApply`
+	 * focused on the success-side decisions.
+	 */
+	private async fetchRemote(): Promise<AdminPolicy | null> {
 		let res: Response;
 		try {
 			res = await this.fetchFn(this.url, {
@@ -93,35 +130,31 @@ export class MdmPoller {
 				headers: { Accept: "application/json" },
 			});
 		} catch (err) {
-			this.logger.warn(
-				`fetch failed for ${this.url}: ${err instanceof Error ? err.message : String(err)}`,
-			);
-			return;
+			this.warn(`fetch failed for ${this.url}: ${errMsg(err)}`);
+			return null;
 		}
-
 		if (!res.ok) {
-			this.logger.warn(`MDM endpoint returned HTTP ${res.status} — skipping`);
-			return;
+			this.warn(`endpoint returned HTTP ${res.status} — skipping`);
+			return null;
 		}
-
 		let json: unknown;
 		try {
 			json = await res.json();
 		} catch (err) {
-			this.logger.warn(
-				`MDM response is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
-			);
-			return;
+			this.warn(`response is not valid JSON: ${errMsg(err)}`);
+			return null;
 		}
-
 		const result = AdminPolicySchema.safeParse(json);
 		if (!result.success) {
-			this.logger.warn(
-				`MDM policy failed schema validation: ${JSON.stringify(result.error.issues)}`,
+			this.warn(
+				`policy failed schema validation: ${JSON.stringify(result.error.issues)}`,
 			);
-			return;
+			return null;
 		}
-
-		this.onFetched(result.data);
+		return result.data;
 	}
+}
+
+function errMsg(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
 }
