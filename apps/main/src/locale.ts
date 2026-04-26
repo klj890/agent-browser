@@ -101,8 +101,15 @@ export class LocaleStore {
 			) {
 				this.user = parsed.user as LocalePref;
 			}
-		} catch {
-			// Missing or corrupt — keep default "auto" rather than crashing boot.
+		} catch (err) {
+			// ENOENT on first run is expected — every other error (permission,
+			// disk failure, malformed JSON) is worth a one-line warning so it
+			// surfaces in logs instead of silently snapping back to default.
+			const code = (err as NodeJS.ErrnoException | null)?.code;
+			if (code !== "ENOENT") {
+				console.warn("[locale] failed to load locale.json:", err);
+			}
+			// Either way, keep default "auto" rather than crashing boot.
 		}
 	}
 

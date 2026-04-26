@@ -55,11 +55,19 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 		const onFocus = () => {
 			void refresh();
 		};
+		const onVisibility = () => {
+			// `visibilitychange` fires on both hide and show — we only care
+			// about the "back to visible" edge so we don't waste an IPC call
+			// when the renderer is being backgrounded.
+			if (document.visibilityState === "visible") {
+				void refresh();
+			}
+		};
 		window.addEventListener("focus", onFocus);
-		document.addEventListener("visibilitychange", onFocus);
+		document.addEventListener("visibilitychange", onVisibility);
 		return () => {
 			window.removeEventListener("focus", onFocus);
-			document.removeEventListener("visibilitychange", onFocus);
+			document.removeEventListener("visibilitychange", onVisibility);
 		};
 	}, [refresh]);
 

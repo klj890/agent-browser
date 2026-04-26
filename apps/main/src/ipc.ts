@@ -13,6 +13,7 @@ import type { BookmarksStore } from "./bookmarks.js";
 import type { DownloadManager } from "./download.js";
 import type { ExtensionHost, InstalledExtension } from "./extension-host.js";
 import type { HistoryStore } from "./history.js";
+import { LOCALE_PREFS } from "./locale.js";
 import type { McpServerHost } from "./mcp-server.js";
 import type { Persona, PersonaManager } from "./persona-manager.js";
 import type { ProfileRecord, ProfileStore } from "./profile-store.js";
@@ -150,13 +151,15 @@ export function registerLocaleIpc(deps: LocaleIpcDeps): () => void {
 		[
 			"locale:setUser",
 			async (_e, value: unknown) => {
+				// Use LOCALE_PREFS as the single source of truth so adding a
+				// language doesn't require touching this validator separately.
 				if (
 					typeof value !== "string" ||
-					(value !== "auto" && value !== "zh" && value !== "en")
+					!(LOCALE_PREFS as readonly string[]).includes(value)
 				) {
 					throw new Error("locale:setUser needs 'auto' | 'zh' | 'en'");
 				}
-				await deps.setUserPref(value);
+				await deps.setUserPref(value as "auto" | "zh" | "en");
 				return deps.getResolution();
 			},
 		],
