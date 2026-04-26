@@ -83,7 +83,9 @@ export function GeneralView() {
 				{savedAt ? (
 					<div className="settings-effective-note">
 						{t("settings.general.savedAt", {
-							time: new Date(savedAt).toLocaleTimeString(),
+							time: new Date(savedAt).toLocaleTimeString(
+								resolution.effective === "zh" ? "zh-CN" : "en-US",
+							),
 						})}
 					</div>
 				) : null}

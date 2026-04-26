@@ -18,6 +18,7 @@ export const zh: Partial<Record<MessageKey, string>> = {
 	"shell.tab.openInProfile": "👤 在身份中打开：{name}",
 	"shell.tab.profileHint": "在 设置 → 身份 中创建更多身份。",
 	"shell.tab.incognitoLabel": "隐私模式",
+	"shell.tab.incognitoSuffix": "（隐私模式）",
 	"shell.tab.profileLabel": "身份",
 	"shell.address.placeholder": "网址或搜索",
 	"shell.address.back": "后退",

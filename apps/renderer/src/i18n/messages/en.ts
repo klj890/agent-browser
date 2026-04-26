@@ -17,6 +17,7 @@ export const en = {
 	"shell.tab.openInProfile": "👤 Open in profile: {name}",
 	"shell.tab.profileHint": "Create additional profiles in Settings → Profiles.",
 	"shell.tab.incognitoLabel": "Incognito",
+	"shell.tab.incognitoSuffix": " (incognito)",
 	"shell.tab.profileLabel": "Profile",
 	"shell.address.placeholder": "URL or search",
 	"shell.address.back": "Back",

@@ -46,8 +46,25 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 		void refresh();
 	}, [refresh]);
 
-	// Re-poll when the policy might have changed (settings overlay close, etc.).
-	// A11y: keep `<html lang>` in sync so screen readers + spellcheck work.
+	// Re-fetch when the renderer regains focus. Catches the MDM case where the
+	// admin policy was rotated (incl. `uiLocale` pin) while the window was in
+	// the background — without this, the user-facing locale would only update
+	// after restart. Cheap (one IPC round-trip) and event-driven, so no polling.
+	// `setUserPref` paths still update state directly via the IPC return value.
+	useEffect(() => {
+		const onFocus = () => {
+			void refresh();
+		};
+		window.addEventListener("focus", onFocus);
+		document.addEventListener("visibilitychange", onFocus);
+		return () => {
+			window.removeEventListener("focus", onFocus);
+			document.removeEventListener("visibilitychange", onFocus);
+		};
+	}, [refresh]);
+
+	// A11y: keep `<html lang>` in sync so screen readers + spellcheck pick up
+	// the right language whenever the effective locale changes.
 	useEffect(() => {
 		document.documentElement.lang =
 			resolution.effective === "zh" ? "zh-CN" : "en";

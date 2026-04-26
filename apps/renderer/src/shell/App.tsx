@@ -97,7 +97,7 @@ export function App() {
 						className={`tab ${tab.active ? "active" : ""}${
 							tab.isIncognito ? " incognito" : ""
 						}`}
-						title={`${tab.url}${tab.isIncognito ? " (incognito)" : ""}`}
+						title={`${tab.url}${tab.isIncognito ? t("shell.tab.incognitoSuffix") : ""}`}
 					>
 						{tab.isIncognito && (
 							<span

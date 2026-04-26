@@ -118,6 +118,20 @@ describe("LocaleStore persistence", () => {
 		expect(s.getUserPref()).toBe("auto");
 	});
 
+	it("does not advance in-memory state when writeFile throws (gemini R1)", async () => {
+		// Point at a path that cannot be written: a pre-existing *file* that we
+		// then ask to be the *directory* for our locale.json.
+		const fs = await import("node:fs/promises");
+		const blocker = path.join(dir, "blocker");
+		await fs.writeFile(blocker, "x", "utf8");
+		const bad = path.join(blocker, "locale.json");
+		const s = new LocaleStore({ filePath: bad, systemLocale: () => "en-US" });
+		await s.load();
+		await expect(s.setUserPref("zh")).rejects.toBeTruthy();
+		// Crucially, in-memory state must NOT have flipped to "zh".
+		expect(s.getUserPref()).toBe("auto");
+	});
+
 	it("resolve() composes admin + user + system correctly", async () => {
 		const s = new LocaleStore({ filePath: file, systemLocale: () => "zh-CN" });
 		await s.load();

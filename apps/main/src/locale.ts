@@ -114,13 +114,16 @@ export class LocaleStore {
 		if (!LOCALE_PREFS.includes(value)) {
 			throw new Error(`invalid locale: ${value}`);
 		}
-		this.user = value;
+		// Write-then-set: if the disk operation throws (permissions, full disk),
+		// the in-memory state must NOT advance — otherwise a subsequent reload
+		// would silently revert and the running session would diverge from disk.
 		await fs.mkdir(path.dirname(this.opts.filePath), { recursive: true });
 		await fs.writeFile(
 			this.opts.filePath,
 			JSON.stringify({ user: value }),
 			"utf8",
 		);
+		this.user = value;
 	}
 
 	resolve(adminPref: LocalePref | null | undefined): LocaleResolution {
