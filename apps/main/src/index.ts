@@ -33,6 +33,7 @@ import {
 	registerDownloadsIpc,
 	registerExtensionsIpc,
 	registerHistoryIpc,
+	registerLocaleIpc,
 	registerMcpIpc,
 	registerPersonaIpc,
 	registerPolicyIpc,
@@ -44,6 +45,7 @@ import {
 	registerTraceIpc,
 	registerVaultIpc,
 } from "./ipc.js";
+import { LocaleStore } from "./locale.js";
 import { McpConfigFileStore } from "./mcp-config.js";
 import { McpExternalManager } from "./mcp-external-manager.js";
 import { McpServerHost } from "./mcp-server.js";
@@ -818,6 +820,20 @@ let globalMdmPoller: MdmPoller | undefined;
 app.whenReady().then(async () => {
 	const policy = await initPolicyProvider();
 	registerPolicyIpc(policy);
+
+	// Locale (Stage 21): user pref persisted in userData; OS locale comes from
+	// Electron `app.getLocale()`. Admin policy `uiLocale` overrides both when
+	// set to a concrete language.
+	const userDataDirEarly = app.getPath("userData");
+	const localeStore = new LocaleStore({
+		filePath: path.join(userDataDirEarly, "agent-browser", "locale.json"),
+		systemLocale: () => app.getLocale(),
+	});
+	await localeStore.load();
+	registerLocaleIpc({
+		getResolution: () => localeStore.resolve(policy.get().uiLocale),
+		setUserPref: (value) => localeStore.setUserPref(value),
+	});
 
 	// MDM (Stage 20): if `mdm.url` is configured, start polling immediately.
 	// The poller runs for the lifetime of the app; `app.on("before-quit")`

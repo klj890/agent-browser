@@ -3,6 +3,7 @@ import { AdminView } from "./admin/AdminView";
 import { BookmarksView } from "./bookmarks/BookmarksView";
 import { DownloadsView } from "./downloads/DownloadsView";
 import { ExtensionsView } from "./extensions/ExtensionsView";
+import { GeneralView } from "./general/GeneralView";
 import { HistoryView } from "./history/HistoryView";
 import { McpView } from "./mcp/McpView";
 import { PersonasView } from "./personas/PersonasView";
@@ -25,6 +26,7 @@ export function SettingsRouter({ onClose }: Props) {
 				<Route path="/" element={<SettingsLayout onClose={onClose} />}>
 					<Route index element={<Navigate to="/settings" replace />} />
 					<Route path="settings" element={<SettingsIndex />} />
+					<Route path="settings/general" element={<GeneralView />} />
 					<Route path="settings/admin" element={<AdminView />} />
 					<Route path="settings/personas" element={<PersonasView />} />
 					<Route path="settings/profiles" element={<ProfilesView />} />

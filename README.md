@@ -11,6 +11,7 @@ module in implementation-ready detail.
 - [docs/ADMIN.md](./docs/ADMIN.md) — administrator policy reference
 - [docs/SECURITY-CHECKLIST.md](./docs/SECURITY-CHECKLIST.md) — threat model verification matrix
 - [docs/stage-2-notes.md](./docs/stage-2-notes.md) — implementation deviations (Stage 2)
+- [docs/I18N.md](./docs/I18N.md) — Stage 21 i18n + a11y reference
 
 ## Status
 
@@ -36,11 +37,13 @@ P1 stages **9–16 code complete**:
 - **Stage 15**: Chrome extensions (MV3 minimal subset)
 - **Stage 16**: end-to-end encrypted bookmarks + history cloud sync (with bookmark tombstones for delete propagation)
 
-P2 in progress:
+P2 stages **17–21 code complete**:
 
 - **Stage 17**: MCP server — external Claude/Cursor can drive this browser
 - **Stage 18**: multi-tab Agent coordination (tabs_list/open/close/switch/wait_load skills)
 - **Stage 19**: team-shared personas + public marketplace (multi-source sync with per-source cursor and failure isolation)
+- **Stage 20**: enterprise MDM — remote policy fetch overrides local (URL pinned to local keychain)
+- **Stage 21**: A11y / i18n — zh + en message catalogs, locale resolver (admin > user > system), Settings → General toggle, `prefers-reduced-motion` + icon-only button aria-labels + `<html lang>` sync
 
 ## Layout
 

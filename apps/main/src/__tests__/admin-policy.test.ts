@@ -45,6 +45,25 @@ describe("AdminPolicy schema", () => {
 			expect(r.data.forceConfirmActions).toContain("file_download");
 		}
 	});
+
+	it("uiLocale defaults to 'auto' (Stage 21)", () => {
+		expect(DEFAULT_POLICY.uiLocale).toBe("auto");
+	});
+
+	it("uiLocale accepts 'auto' | 'zh' | 'en' and rejects others", () => {
+		for (const loc of ["auto", "zh", "en"] as const) {
+			const r = AdminPolicySchema.safeParse({
+				...DEFAULT_POLICY,
+				uiLocale: loc,
+			});
+			expect(r.success).toBe(true);
+		}
+		const bad = AdminPolicySchema.safeParse({
+			...DEFAULT_POLICY,
+			uiLocale: "fr",
+		});
+		expect(bad.success).toBe(false);
+	});
 });
 
 describe("AdminPolicyStore.load", () => {

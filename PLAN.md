@@ -383,7 +383,7 @@ Stage 1/2/4 完全并行；Stage 3 是首个汇合点；Stage 5 必须等 Stage 
 | 12 | 18 | 多 tab Agent 协作（Agent 可开新 tab 调研、汇总，跨 tab 上下文受控） |
 | 12 | 19 | 团队共享角色 + 公共 persona 模板市场 |
 | 13 | 20 | 企业 MDM：策略从远程 URL 拉取，覆盖本地 |
-| 14 | 21 | A11y / 多语言 / 无障碍 |
+| 14 | 21 | A11y / 多语言 / 无障碍（zh + en；admin > user > system；`prefers-reduced-motion`；icon-only 按钮 aria-label） |
 
 ---
 

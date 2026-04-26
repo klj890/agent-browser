@@ -13,6 +13,7 @@ import type { BookmarksStore } from "./bookmarks.js";
 import type { DownloadManager } from "./download.js";
 import type { ExtensionHost, InstalledExtension } from "./extension-host.js";
 import type { HistoryStore } from "./history.js";
+import { LOCALE_PREFS } from "./locale.js";
 import type { McpServerHost } from "./mcp-server.js";
 import type { Persona, PersonaManager } from "./persona-manager.js";
 import type { ProfileRecord, ProfileStore } from "./profile-store.js";
@@ -126,6 +127,47 @@ export function registerPolicyIpc(provider: PolicyProviderLike): () => void {
 	const channel = "policy:get";
 	ipcMain.handle(channel, () => provider.get());
 	return () => ipcMain.removeHandler(channel);
+}
+
+// ---------------------------------------------------------------------------
+// Locale IPC (Stage 21)
+// ---------------------------------------------------------------------------
+
+export interface LocaleIpcDeps {
+	/** Returns the current resolution given the live admin policy. */
+	getResolution(): {
+		effective: "zh" | "en";
+		source: "admin" | "user" | "system";
+		user: "auto" | "zh" | "en";
+		system: "zh" | "en";
+		admin: "auto" | "zh" | "en" | null;
+	};
+	setUserPref(value: "auto" | "zh" | "en"): Promise<void>;
+}
+
+export function registerLocaleIpc(deps: LocaleIpcDeps): () => void {
+	const handlers: Array<[string, (...args: unknown[]) => unknown]> = [
+		["locale:get", () => deps.getResolution()],
+		[
+			"locale:setUser",
+			async (_e, value: unknown) => {
+				// Use LOCALE_PREFS as the single source of truth so adding a
+				// language doesn't require touching this validator separately.
+				if (
+					typeof value !== "string" ||
+					!(LOCALE_PREFS as readonly string[]).includes(value)
+				) {
+					throw new Error("locale:setUser needs 'auto' | 'zh' | 'en'");
+				}
+				await deps.setUserPref(value as "auto" | "zh" | "en");
+				return deps.getResolution();
+			},
+		],
+	];
+	for (const [ch, fn] of handlers) ipcMain.handle(ch, fn);
+	return () => {
+		for (const [ch] of handlers) ipcMain.removeHandler(ch);
+	};
 }
 
 // ---------------------------------------------------------------------------

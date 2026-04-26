@@ -82,6 +82,17 @@ export interface AdminPolicyView {
 	};
 	egress: { blockNonAllowedInAutonomous: boolean; auditAllRequests: boolean };
 	extension: { allowMv3: boolean; allowedExtensionIds: string[] };
+	uiLocale?: "auto" | "zh" | "en";
+}
+
+export type Locale = "zh" | "en";
+export type LocalePref = "auto" | Locale;
+export interface LocaleResolutionView {
+	effective: Locale;
+	source: "admin" | "user" | "system";
+	user: LocalePref;
+	system: Locale;
+	admin: LocalePref | null;
 }
 
 export type AgentStreamChunk =
@@ -319,6 +330,10 @@ export interface AgentBrowserBridge {
 	};
 	policy: {
 		get: () => Promise<AdminPolicyView>;
+	};
+	locale: {
+		get: () => Promise<LocaleResolutionView>;
+		setUser: (value: LocalePref) => Promise<LocaleResolutionView>;
 	};
 	persona: {
 		list: () => Promise<PersonaSummary[]>;
