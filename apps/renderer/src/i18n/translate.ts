@@ -16,6 +16,13 @@ const DICTS: Record<Locale, Partial<Record<MessageKey, string>>> = {
  * Replace `{name}` placeholders. Unknown variables are kept verbatim so a
  * missing context value surfaces as a visible bug rather than silently
  * collapsing into an empty string.
+ *
+ * The `\w+` matcher is intentionally strict: every catalog key uses flat
+ * identifier-style variable names (`name`, `count`, `time`). A broader
+ * `[^}]+` would accidentally swallow user-supplied content that contains a
+ * runaway `{` — e.g. `t("foo", { content: "{ raw text }" })` — instead of
+ * passing it through. We can lift the restriction the day we actually need
+ * dotted paths (none today; YAGNI).
  */
 export function format(
 	template: string,

@@ -81,6 +81,13 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 
 	// A11y: keep `<html lang>` in sync so screen readers + spellcheck pick up
 	// the right language whenever the effective locale changes.
+	//
+	// We deliberately use `zh-CN` (not `zh-TW`/`zh-HK` / bare `zh`) because
+	// our catalog ships exclusively Simplified Chinese strings. The lang
+	// attribute should describe the *content* language, not the user's
+	// locale preference — telling a screen reader the page is `zh-TW` while
+	// rendering zh-CN text would mispronounce / wrong-tone the readout. If
+	// we add zh-TW translations later we'd ship a separate locale code.
 	useEffect(() => {
 		document.documentElement.lang =
 			resolution.effective === "zh" ? "zh-CN" : "en";

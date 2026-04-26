@@ -124,12 +124,15 @@ export class LocaleStore {
 		// Write-then-set: if the disk operation throws (permissions, full disk),
 		// the in-memory state must NOT advance — otherwise a subsequent reload
 		// would silently revert and the running session would diverge from disk.
+		//
+		// Atomic via tmp+rename: a crash mid-write would otherwise leave a
+		// truncated locale.json that fails JSON.parse on next boot. We accept
+		// the default rather than crashing, so it's not catastrophic — but
+		// rename is essentially free and prevents the warn log noise too.
 		await fs.mkdir(path.dirname(this.opts.filePath), { recursive: true });
-		await fs.writeFile(
-			this.opts.filePath,
-			JSON.stringify({ user: value }),
-			"utf8",
-		);
+		const tmpPath = `${this.opts.filePath}.tmp`;
+		await fs.writeFile(tmpPath, JSON.stringify({ user: value }), "utf8");
+		await fs.rename(tmpPath, this.opts.filePath);
 		this.user = value;
 	}
 
