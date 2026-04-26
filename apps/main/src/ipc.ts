@@ -129,6 +129,45 @@ export function registerPolicyIpc(provider: PolicyProviderLike): () => void {
 }
 
 // ---------------------------------------------------------------------------
+// Locale IPC (Stage 21)
+// ---------------------------------------------------------------------------
+
+export interface LocaleIpcDeps {
+	/** Returns the current resolution given the live admin policy. */
+	getResolution(): {
+		effective: "zh" | "en";
+		source: "admin" | "user" | "system";
+		user: "auto" | "zh" | "en";
+		system: "zh" | "en";
+		admin: "auto" | "zh" | "en" | null;
+	};
+	setUserPref(value: "auto" | "zh" | "en"): Promise<void>;
+}
+
+export function registerLocaleIpc(deps: LocaleIpcDeps): () => void {
+	const handlers: Array<[string, (...args: unknown[]) => unknown]> = [
+		["locale:get", () => deps.getResolution()],
+		[
+			"locale:setUser",
+			async (_e, value: unknown) => {
+				if (
+					typeof value !== "string" ||
+					(value !== "auto" && value !== "zh" && value !== "en")
+				) {
+					throw new Error("locale:setUser needs 'auto' | 'zh' | 'en'");
+				}
+				await deps.setUserPref(value);
+				return deps.getResolution();
+			},
+		],
+	];
+	for (const [ch, fn] of handlers) ipcMain.handle(ch, fn);
+	return () => {
+		for (const [ch] of handlers) ipcMain.removeHandler(ch);
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Agent IPC (Stage 3.2)
 // ---------------------------------------------------------------------------
 

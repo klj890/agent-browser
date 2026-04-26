@@ -66,6 +66,10 @@ contextBridge.exposeInMainWorld("agentBrowser", {
 	policy: {
 		get: () => ipcRenderer.invoke("policy:get"),
 	},
+	locale: {
+		get: () => ipcRenderer.invoke("locale:get"),
+		setUser: (value: string) => ipcRenderer.invoke("locale:setUser", value),
+	},
 	persona: {
 		list: () => ipcRenderer.invoke("persona:list"),
 		switch: (slug: string) => ipcRenderer.invoke("persona:switch", slug),

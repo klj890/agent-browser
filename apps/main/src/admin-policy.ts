@@ -176,6 +176,16 @@ export const AdminPolicySchema = z.object({
 			pollIntervalMs: z.number().int().min(60_000).default(3_600_000),
 		})
 		.optional(),
+	/**
+	 * UI locale pin (Stage 21). When set to `'zh'` or `'en'` the renderer
+	 * always renders in that language and the user toggle becomes read-only.
+	 * `'auto'` (default) defers to the user preference file, which itself
+	 * defaults to the OS locale.
+	 *
+	 * Locale is a UI concern — it does NOT influence outgoing LLM prompts or
+	 * the Agent's own language. Personas keep dictating tone separately.
+	 */
+	uiLocale: z.enum(["auto", "zh", "en"]).default("auto"),
 });
 
 export type AdminPolicy = z.infer<typeof AdminPolicySchema>;

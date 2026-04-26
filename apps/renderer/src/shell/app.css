@@ -655,3 +655,81 @@ body,
 .reading-error {
 	color: #a00;
 }
+
+/* Settings → General (Stage 21) */
+.settings-section {
+	max-width: 640px;
+}
+.settings-section-intro {
+	color: #555;
+	margin: 8px 0 16px;
+	line-height: 1.5;
+}
+.settings-fieldset {
+	border: 1px solid #d8dee6;
+	border-radius: 6px;
+	padding: 12px 16px;
+	margin: 12px 0;
+}
+.settings-fieldset legend {
+	padding: 0 6px;
+	font-weight: 600;
+	color: #1a3a6e;
+}
+.settings-radio-group {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.settings-radio-label {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	cursor: pointer;
+}
+.settings-radio-label input[type="radio"]:disabled + span {
+	color: #999;
+}
+.settings-effective {
+	background: #f6f8fb;
+	border: 1px solid #e1e6ee;
+	border-radius: 6px;
+	padding: 10px 14px;
+	margin-top: 12px;
+	font-size: 13px;
+	color: #333;
+}
+.settings-effective-note {
+	color: #555;
+	margin-top: 4px;
+}
+.settings-effective-admin {
+	color: #8a4500;
+}
+.settings-effective-error {
+	color: #a00;
+}
+
+/* A11y: respect users who request reduced motion (Stage 21). */
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.001ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.001ms !important;
+		scroll-behavior: auto !important;
+	}
+}
+
+/* A11y: visible focus ring for keyboard users — Electron's default outline
+   is suppressed by some resets, so we restate it on interactive elements. */
+button:focus-visible,
+[role="menuitem"]:focus-visible,
+.settings-nav-link:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+	outline: 2px solid #1a3a6e;
+	outline-offset: 2px;
+}

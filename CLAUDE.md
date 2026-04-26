@@ -25,7 +25,7 @@
 - ✅ **P0 0–8**：项目脚手架 · Electron shell + CDP · 5 browser-tools + ref registry · AgentHost + mock LLM stream · persona + domain matcher · AdminPolicy + 三档自主度 · RedactionPipeline + audit log · TaskStateStore + slash commands · electron-builder + e2e
 - ✅ **P1 9–16**：Auth Vault · RoutinesEngine · 历史语义索引（transformers.js）· 多 profile + 隐私模式 · 阅读模式 · Trace viewer · Chrome 扩展（MV3 最小子集）· E2E 加密书签/历史同步（含 tombstone）
 - ✅ **P2 17–19**：MCP server · 多 tab Agent 协作 · 多 source personas（团队 + 公共市场，失败隔离）
-- 🚧 **P2 20–21**：企业 MDM · A11y / 多语言
+- ✅ **P2 20–21**：企业 MDM 远程拉取 · A11y / i18n（zh+en，admin>user>system 解析，prefers-reduced-motion）
 
 ## 开发规范（PLAN 里的关键约束摘要）
 

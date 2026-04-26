@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useT } from "../i18n/I18nProvider";
 import type { AgentStreamChunk, PersonaSummary } from "../types/preload";
 import { Composer } from "./Composer";
 import { MessageList, type SidebarMessage } from "./MessageList";
@@ -15,6 +16,7 @@ import { MessageList, type SidebarMessage } from "./MessageList";
  *     transcript unchanged.
  */
 export function Sidebar() {
+	const { t } = useT();
 	const [messages, setMessages] = useState<SidebarMessage[]>([]);
 	const [running, setRunning] = useState(false);
 	const [taskId, setTaskId] = useState<string | null>(null);
@@ -100,14 +102,15 @@ export function Sidebar() {
 	const activePersona = personas.find((p) => p.active);
 
 	return (
-		<aside className="sidebar">
+		<aside className="sidebar" aria-label={t("sidebar.title")}>
 			<div className="sidebar-header">
-				<div className="sidebar-title">Agent</div>
+				<div className="sidebar-title">{t("sidebar.title")}</div>
 				{personas.length > 0 ? (
 					<select
 						className="sidebar-persona"
 						value={activePersona?.slug ?? ""}
 						onChange={(e) => void handleSwitchPersona(e.target.value)}
+						aria-label={t("settings.nav.personas")}
 					>
 						{personas.map((p) => (
 							<option key={p.slug} value={p.slug}>
@@ -121,15 +124,18 @@ export function Sidebar() {
 				{messages.length === 0 ? (
 					<div className="sidebar-empty">
 						{activePersona
-							? `Persona: ${activePersona.name} — ${activePersona.description}`
-							: "No persona loaded."}
+							? t("sidebar.empty.persona", {
+									name: activePersona.name,
+									description: activePersona.description,
+								})
+							: t("sidebar.empty.noPersona")}
 					</div>
 				) : (
 					<MessageList messages={messages} />
 				)}
 				{pageAttached ? (
 					<div className="sidebar-page-attached">
-						Page attached: <code>{pageAttached}</code>
+						{t("sidebar.pageAttached")} <code>{pageAttached}</code>
 					</div>
 				) : null}
 			</div>
