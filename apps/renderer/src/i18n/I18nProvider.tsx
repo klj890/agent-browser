@@ -5,6 +5,7 @@ import {
 	useContext,
 	useEffect,
 	useMemo,
+	useRef,
 	useState,
 } from "react";
 import type { LocalePref, LocaleResolutionView } from "../types/preload";
@@ -51,22 +52,29 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 	// the background — without this, the user-facing locale would only update
 	// after restart. Cheap (one IPC round-trip) and event-driven, so no polling.
 	// `setUserPref` paths still update state directly via the IPC return value.
+	const lastRefreshRef = useRef(0);
 	useEffect(() => {
-		const onFocus = () => {
+		// `focus` and `visibilitychange` (→ visible) typically fire within a
+		// few ms of each other when the user switches back to the app, so we
+		// dedupe by timestamp instead of dropping one listener — different
+		// platforms cover slightly different edges (window focus vs document
+		// visibility) and we want both as a safety net.
+		const REFRESH_DEDUPE_MS = 200;
+		const tryRefresh = () => {
+			const now = Date.now();
+			if (now - lastRefreshRef.current < REFRESH_DEDUPE_MS) return;
+			lastRefreshRef.current = now;
 			void refresh();
 		};
 		const onVisibility = () => {
-			// `visibilitychange` fires on both hide and show — we only care
-			// about the "back to visible" edge so we don't waste an IPC call
-			// when the renderer is being backgrounded.
-			if (document.visibilityState === "visible") {
-				void refresh();
-			}
+			// We only care about the "back to visible" edge — the hide edge
+			// would just waste an IPC call while the renderer is backgrounded.
+			if (document.visibilityState === "visible") tryRefresh();
 		};
-		window.addEventListener("focus", onFocus);
+		window.addEventListener("focus", tryRefresh);
 		document.addEventListener("visibilitychange", onVisibility);
 		return () => {
-			window.removeEventListener("focus", onFocus);
+			window.removeEventListener("focus", tryRefresh);
 			document.removeEventListener("visibilitychange", onVisibility);
 		};
 	}, [refresh]);

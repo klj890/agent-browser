@@ -12,16 +12,27 @@ export function GeneralView() {
 	const { t, resolution, setUserPref } = useT();
 	const [savedAt, setSavedAt] = useState<number | null>(null);
 	const [error, setError] = useState<string | null>(null);
+	// `saving` disables the radio group while the IPC + disk write is in flight.
+	// Two consequences: (a) rapid re-clicks can't race the prior write, and
+	// (b) the UI clearly signals that "your click was received but not yet
+	// persisted" — without this the only feedback was the eventual `savedAt`
+	// stamp, which lands ~100ms later.
+	const [saving, setSaving] = useState(false);
 
 	const adminPinned = resolution.source === "admin";
+	const inputsDisabled = adminPinned || saving;
 
 	const choose = async (pref: LocalePref) => {
+		if (saving) return;
 		setError(null);
+		setSaving(true);
 		try {
 			await setUserPref(pref);
 			setSavedAt(Date.now());
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setSaving(false);
 		}
 	};
 
@@ -46,7 +57,8 @@ export function GeneralView() {
 								value={pref}
 								checked={resolution.user === pref}
 								onChange={() => void choose(pref)}
-								disabled={adminPinned}
+								disabled={inputsDisabled}
+								aria-busy={saving || undefined}
 							/>
 							<span>
 								{pref === "auto"
